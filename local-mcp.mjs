@@ -226,22 +226,22 @@ let watchEventId = 0;
 
 // === Iterative directory tree (stack-safe, no recursion) ===
 export function treeDir(root, maxDepth) {
-  let result = '';
+  const parts = [];
   const stack = [{ dir: root, pre: '', depth: 0 }];
   while (stack.length) {
     const { dir, pre, depth } = stack.pop();
-    if (depth >= maxDepth) { result += pre + '...\n'; continue; }
+    if (depth >= maxDepth) { parts.push(pre + '...\n'); continue; }
     const items = readdirSync(dir, { withFileTypes: true });
     const children = [];
     for (let i = 0; i < items.length; i++) {
       const entry = items[i];
       const last = i === items.length - 1;
-      result += pre + (last ? '└── ' : '├── ') + entry.name + '\n';
+      parts.push(pre + (last ? '└── ' : '├── ') + entry.name + '\n');
       if (entry.isDirectory()) children.push({ dir: join(dir, entry.name), pre: pre + (last ? '    ' : '│   '), depth: depth + 1 });
     }
     for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
   }
-  return result;
+  return parts.join('');
 }
 
 // === Read cache + atomic write ===
