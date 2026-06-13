@@ -145,6 +145,27 @@ describe('createProtocolHandler', () => {
     assert.equal(result.result.resourceTemplates[0].uriTemplate, 'file:///workspace/**');
   });
 
+  it('should handle prompts/list', () => {
+    const customHandlers = {
+      _prompts: () => [{ name: 'summarize', description: 'Summarize', arguments: [] }]
+    };
+    const proto2 = createProtocolHandler(tools, customHandlers);
+    const result = proto2.handleMessage({ method: 'prompts/list', id: 13 });
+    assert.equal(result.id, 13);
+    assert.equal(result.result.prompts.length, 1);
+    assert.equal(result.result.prompts[0].name, 'summarize');
+  });
+
+  it('should handle prompts/get', () => {
+    const customHandlers = {
+      _getPrompt: p => [{ type: 'text', text: 'Hello ' + (p?.arguments?.name || 'world') }]
+    };
+    const proto2 = createProtocolHandler(tools, customHandlers);
+    const result = proto2.handleMessage({ method: 'prompts/get', id: 14, params: { name: 'greet', arguments: { name: 'test' } } });
+    assert.equal(result.id, 14);
+    assert.equal(result.result.messages[0].text, 'Hello test');
+  });
+
   it('should return null for unknown methods', () => {
     const result = proto.handleMessage({ method: 'unknown', id: 99 });
     assert.equal(result, null);

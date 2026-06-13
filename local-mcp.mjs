@@ -1,5 +1,5 @@
 import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream, existsSync } from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import { resolve, join } from 'path';
 import { createInterface } from 'readline';
@@ -295,6 +295,7 @@ function updateCache(f) {
   } catch {}
 }
 function atomicWrite(f, content) {
+  if (existsSync(f) && statSync(f).isDirectory()) throw err('IS_DIRECTORY', 'Path is a directory: ' + f);
   const tmp = f + '.tmp.' + Date.now();
   writeFileSync(tmp, content, 'utf-8');
   renameSync(tmp, f);
@@ -452,6 +453,11 @@ function loadBookmarks() {
   return _bookmarkCache;
 }
 function saveBookmarks(bm) { _bookmarkCache = bm; atomicWrite(BOOKMARK_FILE, JSON.stringify(bm)); }
+
+function sanitizeKey(key) {
+  if (key === '__proto__' || key === 'constructor' || key === 'prototype') throw err('FORBIDDEN_KEY', 'Reserved key: ' + key);
+  return key;
+}
 
 const h = {
   search_tools: p => {
@@ -652,15 +658,15 @@ const h = {
       case 'add':
         checkReadonly();
         if (!p.name || !p.path) throw err("MISSING_PARAM", "Need name and path");
-        bm[p.name] = ok(p.path); saveBookmarks(bm); return 'ok';
+        bm[sanitizeKey(p.name)] = ok(p.path); saveBookmarks(bm); return 'ok';
       case 'get':
         if (!p.name) throw err("MISSING_PARAM", "Need name");
-        return bm[p.name] || null;
+        return bm[sanitizeKey(p.name)] || null;
       case 'list': return bm;
       case 'delete':
         checkReadonly();
         if (!p.name) throw err("MISSING_PARAM", "Need name");
-        delete bm[p.name]; saveBookmarks(bm); return 'ok';
+        delete bm[sanitizeKey(p.name)]; saveBookmarks(bm); return 'ok';
       default: throw err("INVALID_ACTION", "action: add|get|list|delete");
     }
   },
@@ -733,6 +739,19 @@ h._resourceTemplates = () => {
     { uriTemplate: ws + '/**', name: 'Workspace files', description: 'All files under workspace, matched by glob pattern' }
   ];
 };
+h._prompts = () => [
+  { name: 'review_changes', description: 'Review file changes and suggest improvements', arguments: [{ name: 'path', description: 'File or directory to review', required: true }] },
+  { name: 'summarize', description: 'Summarize file content', arguments: [{ name: 'path', description: 'File path', required: true }] }
+];
+h._getPrompt = p => {
+  if (p?.name === 'review_changes') {
+    return [{ type: 'text', text: `Please review the changes in ${p.arguments?.path || 'the specified path'}. Look for bugs, performance issues, and code style problems.` }];
+  }
+  if (p?.name === 'summarize') {
+    return [{ type: 'text', text: `Please provide a concise summary of the file at ${p.arguments?.path || 'the specified path'}.` }];
+  }
+  return [];
+};
 
 // === CLI ===
 // Only start server when run directly, not when imported for testing
@@ -750,6 +769,25 @@ if (isMain) {
     if (idx !== -1 && idx + 1 < args.length) return parseInt(args[idx + 1], 10);
     return parseInt(process.env.MCP_PORT || '3100', 10);
   })();
+
+  if (args.includes('--list-tools') || args.includes('--help')) {
+    if (args.includes('--help')) {
+      process.stderr.write(`local-mcp MCP server
+Usage: node local-mcp.mjs [options]
+
+Options:
+  --http          Start in HTTP mode (default: stdio)
+  --port <num>    HTTP port (default: 3100, env: MCP_PORT)
+  --list-tools    Print available tools and exit
+  --help          Show this help
+`);
+    }
+    process.stderr.write('Available tools:\n');
+    for (const t of _toolCatalog) {
+      process.stderr.write(`  ${t.name}  - ${t.description}\n`);
+    }
+    process.exit(0);
+  }
 
   if (httpMode) {
     serveHttp(tools, h, httpPort);
