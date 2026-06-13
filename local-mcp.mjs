@@ -244,19 +244,44 @@ export function treeDir(root, maxDepth) {
   return parts.join('');
 }
 
-// === Read cache + atomic write ===
-const readCache = new Map(), MAX_CACHE = 10;
+// === Read cache + atomic write (size-aware eviction) ===
+const readCache = new Map();
+const CACHE_MAX_ITEMS = 50;
+const CACHE_MAX_BYTES = 10 * 1024 * 1024;
+let cacheBytes = 0;
+
+function evictCache() {
+  while (readCache.size > CACHE_MAX_ITEMS || (cacheBytes > CACHE_MAX_BYTES && readCache.size > 1)) {
+    // Evict largest entry to reclaim most bytes per eviction
+    let maxKey, maxSize = -1;
+    for (const [k, v] of readCache) {
+      if (v.size > maxSize) { maxSize = v.size; maxKey = k; }
+    }
+    if (maxKey) { cacheBytes -= readCache.get(maxKey).size; readCache.delete(maxKey); }
+  }
+}
+
 function cachedRead(f) {
-  const mtime = statSync(f).mtimeMs;
+  const st = statSync(f);
   const entry = readCache.get(f);
-  if (entry && entry.mtime === mtime) return entry.content;
+  if (entry && entry.mtime === st.mtimeMs) return entry.content;
   const content = readFileSync(f, 'utf-8');
-  readCache.set(f, { content, mtime });
-  if (readCache.size > MAX_CACHE) { const k = readCache.keys().next().value; if (k !== undefined) readCache.delete(k); }
+  readCache.set(f, { content, mtime: st.mtimeMs, size: st.size });
+  cacheBytes += st.size;
+  if (readCache.size > CACHE_MAX_ITEMS || cacheBytes > CACHE_MAX_BYTES) evictCache();
   return content;
 }
-function invalidateCache(f) { readCache.delete(f); }
-function updateCache(f) { try { const c = readFileSync(f, 'utf-8'); readCache.set(f, { content: c, mtime: statSync(f).mtimeMs }); } catch {} }
+function invalidateCache(f) { const e = readCache.get(f); if (e) { cacheBytes -= e.size; readCache.delete(f); } }
+function updateCache(f) {
+  try {
+    const content = readFileSync(f, 'utf-8');
+    const st = statSync(f);
+    const old = readCache.get(f);
+    if (old) cacheBytes -= old.size;
+    readCache.set(f, { content, mtime: st.mtimeMs, size: st.size });
+    cacheBytes += st.size;
+  } catch {}
+}
 function atomicWrite(f, content) {
   const tmp = f + '.tmp.' + Date.now();
   writeFileSync(tmp, content, 'utf-8');
