@@ -1,6 +1,7 @@
 node_modules/
 .mcp-data/
 *.tmp.*
+.test-*/
 *.log
 .DS_Store
 Thumbs.db

@@ -8,7 +8,8 @@
     "local-mcp": "./local-mcp.mjs"
   },
   "scripts": {
-    "start": "node local-mcp.mjs"
+    "start": "node local-mcp.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "diff": "^9.0.0",

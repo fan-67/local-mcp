@@ -1,10 +1,13 @@
-import { serve, serveHttp } from './lib/mcp-core.mjs';
+import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync, watch as fsWatch } from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import { resolve, join } from 'path';
 import { globSync } from 'glob';
 import { createTwoFilesPatch } from 'diff';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
+
+// === Exported for testing ===
+export { createProtocolHandler as _createProtocolHandler };
 
 // === Read-only mode ===
 const READONLY = process.env.MCP_READONLY === 'true' || process.env.MCP_READONLY === '1';
@@ -15,15 +18,15 @@ function checkReadonly() {
 const ALLOW = [resolve(WORKSPACE + '/')];
 function ok(p) { const f = resolve(p); if (!ALLOW.some(a => f.startsWith(a))) throw err("PERMISSION_DENIED", `Path must be under ${WORKSPACE}/`); return f; }
 function err(t, msg) { const e = new Error(msg); e.code = e.type = t; return e; }
-function nl(t) { return (t || '').replace(/\r\n/g, '\n'); }
+export function nl(t) { return (t || '').replace(/\r\n/g, '\n'); }
 
 // === File URI helpers ===
-function fileUriToPath(uri) {
+export function fileUriToPath(uri) {
   if (!uri.startsWith('file://')) throw err('INVALID_URI', 'Only file:// URIs are supported');
   const p = decodeURIComponent(uri.slice(7));
   return process.platform === 'win32' ? p.replace(/^\/([a-zA-Z]):\//, '$1:\\') : p;
 }
-function pathToFileUri(p) {
+export function pathToFileUri(p) {
   const abs = resolve(p);
   return 'file://' + (process.platform === 'win32' ? '/' + abs.replace(/\\/g, '/') : abs);
 }
@@ -33,7 +36,7 @@ const watchers = new Map();
 let watchEventId = 0;
 
 // === Iterative directory tree (stack-safe, no recursion) ===
-function treeDir(root, maxDepth) {
+export function treeDir(root, maxDepth) {
   let result = '';
   const stack = [{ dir: root, pre: '', depth: 0 }];
   while (stack.length) {
@@ -72,7 +75,7 @@ function atomicWrite(f, content) {
   invalidateCache(f);
 }
 
-function compactDiff(diff) {
+export function compactDiff(diff) {
   const lines = diff.split('\n');
   let add = 0, del = 0;
   for (const l of lines) {
@@ -82,7 +85,7 @@ function compactDiff(diff) {
   return `+${add}/-${del} lines`;
 }
 
-function scoreResults(results, query) {
+export function scoreResults(results, query) {
   const q = query.toLowerCase();
   return results.map(r => {
     let s = 0;
@@ -109,7 +112,7 @@ const tools = [
   { name: 'watch', description: 'Watch file/directory for changes (polling-based, returns new events since last call)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to file or directory to watch' }, once: { type: 'boolean', description: 'If true, returns current state and stops watching' } }, required: ['path'] } }
 ];
 
-function applyEdit(content, oldText, newText) {
+export function applyEdit(content, oldText, newText) {
   const nOld = nl(oldText);
   const nNew = nl(newText || '');
   // Exact match (fast path)
@@ -133,7 +136,7 @@ function applyEdit(content, oldText, newText) {
   throw err("MATCH_NOT_FOUND", "Match not found: " + (oldText || '').slice(0, 50));
 }
 
-function findBlock(lines, name) {
+export function findBlock(lines, name) {
   const re = new RegExp('(?:function|const|let|var|async)\\s+' + name + '\\b|' + name + '\\s*[:=]\\s*(?:async\\s+)?[(\\(]|' + name + '\\s*[:=]\\s*(?:async\\s+)?\\w+\\s*=>');
   for (let i = 0; i < lines.length; i++) {
     if (re.test(lines[i])) {
@@ -396,13 +399,13 @@ const h = {
 };
 
 // === Resource support ===
-function listResources() {
+export function listResources() {
   return [
     { uri: pathToFileUri(WORKSPACE), name: 'Workspace root', description: `Workspace directory: ${WORKSPACE}`, mimeType: 'inode/directory' }
   ];
 }
 
-function readResource(uri) {
+export function readResource(uri) {
   const p = fileUriToPath(uri);
   const resolved = ok(p);
   const s = statSync(resolved);
@@ -422,16 +425,20 @@ h._resources = listResources;
 h._readResource = readResource;
 
 // === CLI ===
-const args = process.argv.slice(2);
-const httpMode = args.includes('--http');
-const httpPort = (() => {
-  const idx = args.indexOf('--port');
-  if (idx !== -1 && idx + 1 < args.length) return parseInt(args[idx + 1], 10);
-  return parseInt(process.env.MCP_PORT || '3100', 10);
-})();
+// Only start server when run directly, not when imported for testing
+const isMain = process.argv[1] && (process.argv[1] === resolve(import.meta.url.replace('file://', '')) || process.argv[1].endsWith('/local-mcp.mjs'));
+if (isMain) {
+  const args = process.argv.slice(2);
+  const httpMode = args.includes('--http');
+  const httpPort = (() => {
+    const idx = args.indexOf('--port');
+    if (idx !== -1 && idx + 1 < args.length) return parseInt(args[idx + 1], 10);
+    return parseInt(process.env.MCP_PORT || '3100', 10);
+  })();
 
-if (httpMode) {
-  serveHttp(tools, h, httpPort);
-} else {
-  serve(tools, h);
+  if (httpMode) {
+    serveHttp(tools, h, httpPort);
+  } else {
+    serve(tools, h);
+  }
 }
