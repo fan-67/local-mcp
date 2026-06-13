@@ -7,7 +7,7 @@ import { createTwoFilesPatch } from 'diff';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 
 const ALLOW = [resolve(WORKSPACE + '/')];
-function ok(p) { const f = resolve(p); if (!ALLOW.some(a => f.startsWith(a))) throw err("PERMISSION_DENIED", `路径必须在 ${WORKSPACE}/ 下`); return f; }
+function ok(p) { const f = resolve(p); if (!ALLOW.some(a => f.startsWith(a))) throw err("PERMISSION_DENIED", `Path must be under ${WORKSPACE}/`); return f; }
 function err(t, msg) { const e = new Error(msg); e.code = e.type = t; return e; }
 function nl(t) { return (t || '').replace(/\r\n/g, '\n'); }
 
@@ -58,7 +58,7 @@ function compactDiff(diff) {
     if (l.startsWith('+') && !l.startsWith('+++')) add++;
     else if (l.startsWith('-') && !l.startsWith('---')) del++;
   }
-  return `+${add}/-${del}行`;
+  return `+${add}/-${del} lines`;
 }
 
 function scoreResults(results, query) {
@@ -76,14 +76,14 @@ function scoreResults(results, query) {
 }
 
 const tools = [
-  { name: 'read', description: '读文件(head/tail限制行数)', inputSchema: { type: 'object', properties: { path: { type: 'string' }, head: { type: 'number' }, tail: { type: 'number' } }, required: ['path'] } },
-  { name: 'search', description: '搜索(glob/grep渐进降级,exclude排除,ext过滤)', inputSchema: { type: 'object', properties: { p: { type: 'string' }, exclude: { type: 'string' }, ext: { type: 'string' } }, required: ['p'] } },
-  { name: 'ls', description: '列目录(sort=size,tree树状,depth=N,detail全量)', inputSchema: { type: 'object', properties: { p: { type: 'string' }, sort: { type: 'string' }, tree: { type: 'boolean' }, depth: { type: 'number' }, detail: { type: 'boolean' } } } },
-  { name: 'exec', description: '执行命令(b64=base64,cwd目录,t=超时秒)', inputSchema: { type: 'object', properties: { cmd: { type: 'string' }, args: { type: 'array', items: { type: 'string' } }, cwd: { type: 'string' }, t: { type: 'number' }, b64: { type: 'boolean' } } } },
-  { name: 'batch', description: '批量操作(stopOnError,atomic回滚,$prev引用)', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' } }, stopOnError: { type: 'boolean' }, atomic: { type: 'boolean' } }, required: ['ops'] } },
-  { name: 'file', description: '文件操作(action=read|write|edit|append|delete|info|mkdir)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' }, head: { type: 'number' }, tail: { type: 'number' }, dryRun: { type: 'boolean' } }, required: ['action', 'path'] } },
-  { name: 'block', description: '代码块操作(range行号/name函数名,dryRun预览)', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, range: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } }, name: { type: 'string' }, content: { type: 'string' }, dryRun: { type: 'boolean' } }, required: ['path', 'action'] } },
-  { name: 'bookmark', description: '书签(action=add|get|list|delete,持久化路径)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } }
+  { name: 'read', description: 'Read file (head/tail to limit lines)', inputSchema: { type: 'object', properties: { path: { type: 'string' }, head: { type: 'number' }, tail: { type: 'number' } }, required: ['path'] } },
+  { name: 'search', description: 'Search (glob|grep, exclude filter, ext filter)', inputSchema: { type: 'object', properties: { p: { type: 'string' }, exclude: { type: 'string' }, ext: { type: 'string' } }, required: ['p'] } },
+  { name: 'ls', description: 'List dir (sort=size, tree view, depth=N, detail=full)', inputSchema: { type: 'object', properties: { p: { type: 'string' }, sort: { type: 'string' }, tree: { type: 'boolean' }, depth: { type: 'number' }, detail: { type: 'boolean' } } } },
+  { name: 'exec', description: 'Execute command (b64=base64, cwd=dir, t=timeout)', inputSchema: { type: 'object', properties: { cmd: { type: 'string' }, args: { type: 'array', items: { type: 'string' } }, cwd: { type: 'string' }, t: { type: 'number' }, b64: { type: 'boolean' } } } },
+  { name: 'batch', description: 'Batch ops (stopOnError, atomic rollback, $prev ref)', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' } }, stopOnError: { type: 'boolean' }, atomic: { type: 'boolean' } }, required: ['ops'] } },
+  { name: 'file', description: 'File ops (action=read|write|edit|append|delete|info|mkdir)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' }, head: { type: 'number' }, tail: { type: 'number' }, dryRun: { type: 'boolean' } }, required: ['action', 'path'] } },
+  { name: 'block', description: 'Block ops (range=line no, name=func name, dryRun=preview)', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, range: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } }, name: { type: 'string' }, content: { type: 'string' }, dryRun: { type: 'boolean' } }, required: ['path', 'action'] } },
+  { name: 'bookmark', description: 'Bookmark (action=add|get|list|delete, persisted path)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } }
 ];
 
 function applyEdit(content, oldText, newText) {
@@ -107,7 +107,7 @@ function applyEdit(content, oldText, newText) {
       return cLines.join('\n');
     }
   }
-  throw err("MATCH_NOT_FOUND", "未找到匹配文本: " + (oldText || '').slice(0, 50));
+  throw err("MATCH_NOT_FOUND", "Match not found: " + (oldText || '').slice(0, 50));
 }
 
 function findBlock(lines, name) {
@@ -205,10 +205,10 @@ const h = {
     return `${files} files, ${dirs} dirs (${kb})`;
   },
   tree: p => (p.p || 'MCP') + '/\n' + treeDir(ok(p.p || MCP_DIR), p.depth || 2),
-  // exec: bat绕行方案 — Chatbox CVE-2026-6130 拦截顶层cmd参数
-  // 命令写入 run.bat → spawnSync → 立即删除
-  // b64: base64 → PowerShell解码, 绕过cmd转义; batch内嵌exec不受影响
-  // ⚠️ 不要删掉taskkill — 超时进程会残留
+  // exec: bat workaround — Chatbox CVE-2026-6130 blocks top-level cmd params
+  // write cmd to run.bat → spawnSync → delete immediately
+  // b64: base64 → PowerShell decode, bypass cmd escaping; batch embedded exec unaffected
+  // ⚠️ keep taskkill — zombie processes linger on timeout
   exec: p => {
     const cmd = p.args ? p.args.join(' ') : (p.cmd || '');
     if (!cmd) return '';
@@ -248,7 +248,7 @@ const h = {
         if (typeof v === 'string' && v.includes('$prev')) op[k] = v.replace(/\$prev/g, prev ?? '');
       }
       try {
-        if (!h[op.op]) throw new Error('未知操作: ' + op.op);
+        if (!h[op.op]) throw new Error('Unknown operation: ' + op.op);
         prev = h[op.op](op);
         results.push({ ok: true, op: op.op, r: prev });
       } catch (e) {
@@ -285,12 +285,12 @@ const h = {
     if (p.range) { rStart = p.range.start - 1; rEnd = (p.range.end || p.range.start) - 1; }
     if (p.name) {
       const blk = findBlock(lines, p.name);
-      if (!blk) throw err("NAME_NOT_FOUND", "未找到: " + p.name);
+      if (!blk) throw err("NAME_NOT_FOUND", "Not found: " + p.name);
       rStart = rStart != null ? Math.max(rStart, blk.start) : blk.start;
       rEnd = rEnd != null ? Math.min(rEnd, blk.end) : blk.end;
     }
-    if (rStart == null) throw err("MISSING_PARAM", "需要 range 或 name 定位");
-    if (rStart < 0 || rEnd >= lines.length) throw err("OUT_OF_RANGE", `行号越界: ${rStart + 1}-${rEnd + 1} (文件共${lines.length}行)`);
+    if (rStart == null) throw err("MISSING_PARAM", "Need range or name parameter");
+    if (rStart < 0 || rEnd >= lines.length) throw err("OUT_OF_RANGE", `Line range out of bounds: ${rStart + 1}-${rEnd + 1} (file has ${lines.length} lines)`);
     const act = p.action;
     if (act === 'read') return lines.slice(rStart, rEnd + 1).join('\n');
     const before = lines.slice(0, rStart).join('\n');
@@ -315,14 +315,14 @@ const h = {
     const bm = loadBookmarks();
     switch (p.action) {
       case 'add':
-        if (!p.name || !p.path) throw err("MISSING_PARAM", "需要 name 和 path");
+        if (!p.name || !p.path) throw err("MISSING_PARAM", "Need name and path");
         bm[p.name] = ok(p.path); saveBookmarks(bm); return 'ok';
       case 'get':
-        if (!p.name) throw err("MISSING_PARAM", "需要 name");
+        if (!p.name) throw err("MISSING_PARAM", "Need name");
         return bm[p.name] || null;
       case 'list': return bm;
       case 'delete':
-        if (!p.name) throw err("MISSING_PARAM", "需要 name");
+        if (!p.name) throw err("MISSING_PARAM", "Need name");
         delete bm[p.name]; saveBookmarks(bm); return 'ok';
       default: throw err("INVALID_ACTION", "action: add|get|list|delete");
     }
