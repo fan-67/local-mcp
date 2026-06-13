@@ -1,7 +1,7 @@
 import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, globSync, glob, openSync, readSync, closeSync, createReadStream, existsSync, cpSync } from 'fs';
 import { execSync, spawnSync } from 'child_process';
-import { resolve, join } from 'path';
+import { resolve, join, basename } from 'path';
 import { createInterface } from 'readline';
 import { fileURLToPath } from 'url';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
@@ -33,7 +33,7 @@ function isBinary(fp) {
 }
 
 // === Excluded dirs + .gitignore ===
-const EXCLUDE_DIRS = ['node_modules', '.git', 'dist', '__pycache__', 'coverage', '.next'];
+const EXCLUDE_DIRS = ['node_modules', '.git', 'dist', '__pycache__', 'coverage', '.next', ...(process.env.MCP_EXCLUDE ? process.env.MCP_EXCLUDE.split(',').map(s => s.trim()).filter(Boolean) : [])];
 function isExcluded(p) { return EXCLUDE_DIRS.some(d => p.includes('/' + d + '/') || p.includes('/' + d) || p.startsWith(d + '/') || p === d); }
 
 // Load .gitignore patterns from workspace root
@@ -261,6 +261,7 @@ export function treeDir(root, maxDepth) {
 const readCache = new Map();
 const CACHE_MAX_ITEMS = 50;
 const CACHE_MAX_BYTES = 10 * 1024 * 1024;
+const CACHE_TTL_MS = 5000;
 let cacheBytes = 0;
 
 function evictCache() {
@@ -277,9 +278,9 @@ function evictCache() {
 function cachedRead(f) {
   const st = statSync(f);
   const entry = readCache.get(f);
-  if (entry && entry.mtime === st.mtimeMs) return entry.content;
+  if (entry && entry.mtime === st.mtimeMs && Date.now() - entry.cachedAt < CACHE_TTL_MS) return entry.content;
   const content = readFileSync(f, 'utf-8');
-  readCache.set(f, { content, mtime: st.mtimeMs, size: st.size });
+  readCache.set(f, { content, mtime: st.mtimeMs, size: st.size, cachedAt: Date.now() });
   cacheBytes += st.size;
   if (readCache.size > CACHE_MAX_ITEMS || cacheBytes > CACHE_MAX_BYTES) evictCache();
   return content;
@@ -340,17 +341,19 @@ export function scoreResults(results, query) {
 }
 
 const _toolCatalog = [
-  { name: 'read', description: 'Read file content', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to file' }, head: { type: 'number', description: 'Lines from start' }, tail: { type: 'number', description: 'Lines from end' } }, required: ['path'] } },
-  { name: 'search', description: 'Find files by name or content (glob then grep)', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern' }, ext: { type: 'string', description: 'File extension filter' } }, required: ['p'] } },
-  { name: 'ls', description: 'List directory contents', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, tree: { type: 'boolean', description: 'Show tree view' }, depth: { type: 'number', description: 'Tree depth' } } } },
-  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command string' }, cwd: { type: 'string', description: 'Working directory' }, t: { type: 'number', description: 'Timeout seconds' }, b64: { type: 'boolean' } } } },
-  { name: 'move', description: 'Move or rename file/directory', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] } },
-  { name: 'batch', description: 'Batch operations with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' } }, atomic: { type: 'boolean' } }, required: ['ops'] } },
-  { name: 'file', description: 'Unified file operations (read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' } }, required: ['action', 'path'] } },
-  { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, name: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'action'] } },
-  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } },
+  { name: 'read', description: 'Read file, optional head/tail', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, head: { type: 'number', description: 'Lines from start (default 100 for big files)' }, tail: { type: 'number', description: 'Lines from end' } }, required: ['path'] } },
+  { name: 'search', description: 'Find files by name or grep content', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern' }, ext: { type: 'string', description: 'File extension filter e.g. .js .mjs' } }, required: ['p'] } },
+  { name: 'ls', description: 'List directory contents compact', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, tree: { type: 'boolean' }, depth: { type: 'number' }, sort: { type: 'string' } } } },
+  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command' }, cwd: { type: 'string' }, t: { type: 'number', description: 'Timeout seconds' }, b64: { type: 'boolean' } } } },
+  { name: 'move', description: 'Move or rename file', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] } },
+  { name: 'batch', description: 'Batch ops with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array' }, atomic: { type: 'boolean' } }, required: ['ops'] } },
+  { name: 'file', description: 'Unified: read|write|edit|append|delete|info|mkdir|move', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' } }, required: ['action', 'path'] } },
+  { name: 'block', description: 'Code block by range or function', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, name: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'action'] } },
+  { name: 'bookmark', description: 'Path alias add|get|list|delete', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } },
   { name: 'grep', description: 'Search file contents by pattern', inputSchema: { type: 'object', properties: { s: { type: 'string' }, ext: { type: 'string' } }, required: ['s'] } },
-  { name: 'watch', description: 'Watch file/directory for changes', inputSchema: { type: 'object', properties: { path: { type: 'string' }, once: { type: 'boolean' } }, required: ['path'] } }
+  { name: 'watch', description: 'Watch file/dir for changes', inputSchema: { type: 'object', properties: { path: { type: 'string' }, once: { type: 'boolean' } }, required: ['path'] } },
+  { name: 'copy', description: 'Copy file or directory', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] } },
+  { name: 'diff', description: 'Diff two files or strings', inputSchema: { type: 'object', properties: { path1: { type: 'string' }, path2: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' } } } }
 ];
 
 // Exposed to client: 3 meta-tools instead of full catalog (~90% token savings)
@@ -410,15 +413,18 @@ export function findBlock(lines, name) {
 async function runGrep(s, ext) {
   const exts = ext ? ext.split(/\s+/).filter(Boolean) : ['.mjs', '.js'];
   const q = s.toLowerCase();
+  const MAX_SEARCH_FILES = 5000;
 
-  // Collect all eligible files
+  // Collect all eligible files (async glob)
   const allFiles = [];
   for (const e of exts) {
     const pat = e.startsWith('.') ? `**/*${e}` : `**/*.${e}`;
-    const files = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
+    const files = await glob(pat, { cwd: WORKSPACE, exclude: isSkipped });
     for (const f of files) {
       if (!isBinary(join(WORKSPACE, f))) allFiles.push(f);
+      if (allFiles.length >= MAX_SEARCH_FILES) break;
     }
+    if (allFiles.length >= MAX_SEARCH_FILES) break;
   }
 
   // Process with bounded concurrency
@@ -434,7 +440,7 @@ async function runGrep(s, ext) {
         let ln = 0;
         for await (const line of rl) {
           ln++;
-          if (line.toLowerCase().includes(q)) local.push(`${f}:${ln}`);
+          if (line.toLowerCase().includes(q)) local.push(`${f}:${ln}:${line.replace(/\t/g, ' ').trimEnd()}`);
         }
       } catch {}
     }
@@ -485,12 +491,17 @@ const h = {
     const f = ok(p.path);
     let c = cachedRead(f);
     const lines = c.split('\n');
-    if (p.head && p.tail) {
-      if (p.head + p.tail >= lines.length) return c;
-      return lines.slice(0, p.head).join('\n') + `\n... (${lines.length - p.head - p.tail} lines omitted) ...\n` + lines.slice(-p.tail).join('\n');
+    const head = p.head ?? (lines.length > 200 ? 100 : undefined);
+    const tail = p.tail;
+    if (head && tail) {
+      if (head + tail >= lines.length) return c;
+      return lines.slice(0, head).join('\n') + `\n... (${lines.length - head - tail} lines omitted) ...\n` + lines.slice(-tail).join('\n');
     }
-    if (p.head) return lines.slice(0, p.head).join('\n');
-    if (p.tail) return lines.slice(-p.tail).join('\n');
+    if (head) {
+      if (head >= lines.length) return c;
+      return lines.slice(0, head).join('\n') + `\n... [truncated: ${lines.length} lines. Use head=N for more]`;
+    }
+    if (tail) return lines.slice(-tail).join('\n');
     return c;
   },
   write: p => { checkReadonly(); atomicWrite(ok(p.path), p.content); updateCache(ok(p.path)); return 'ok'; },
@@ -510,32 +521,44 @@ const h = {
   search: async p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
     for (const pat of pats) {
-      const results = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
+      const results = await glob(pat, { cwd: WORKSPACE, exclude: isSkipped });
       if (results.length) return scoreResults(results, p.p);
     }
     const found = await runGrep(p.p, p.ext || '.mjs .js');
     if (found.length) return scoreResults(found, p.p);
-    return [];
+    return [{ name: p.p, description: `0 exact matches. Try broader query?` }];
   },
   grep: p => runGrep(p.s, p.ext),
   ls: p => {
     if (p.tree) return (p.p || 'MCP') + '/\n' + treeDir(ok(p.p || MCP_DIR), p.depth || 2);
     const d = ok(p.p || DATA);
-    const items = readdirSync(d, { withFileTypes: true }).map(e => ({ n: e.name, d: e.isDirectory(), s: e.isFile() ? statSync(join(d, e.name)).size : 0 }));
-    if (p.sort === 'size') items.sort((a, b) => b.s - a.s);
-    if (p.detail) return items;
-    const files = items.filter(i => !i.d).length;
-    const dirs = items.filter(i => i.d).length;
-    const total = items.reduce((a, i) => a + i.s, 0);
-    const kb = total > 1024 ? (total / 1024).toFixed(1) + 'KB' : total + 'B';
-    return `${files} files, ${dirs} dirs (${kb})`;
+    const items = readdirSync(d, { withFileTypes: true });
+    const lines = items.map(e => {
+      if (e.isDirectory()) return `${e.name}/           d`;
+      const s = statSync(join(d, e.name));
+      return `${e.name.padEnd(16)} f  ${s.size > 1024 ? (s.size / 1024).toFixed(1) + 'KB' : s.size + 'B'}`;
+    });
+    if (p.sort === 'size') lines.sort((a, b) => {
+      const sa = parseFloat(a.split(' ').pop()) || 0;
+      const sb = parseFloat(b.split(' ').pop()) || 0;
+      return sb - sa;
+    });
+    return lines.join('\n');
   },
-  // exec: bat workaround — Chatbox CVE-2026-6130 blocks top-level cmd params
-  // write cmd to run.bat → spawnSync → delete immediately
-  // b64: base64 → PowerShell decode, bypass cmd escaping; batch embedded exec unaffected
+  copy: p => { checkReadonly(); cpSync(ok(p.source), ok(p.destination), { recursive: true }); return 'ok'; },
+  diff: p => {
+    let oldStr, newStr, oldName = 'old', newName = 'new';
+    if (p.path1 && p.path2) {
+      oldStr = cachedRead(ok(p.path1)); oldName = p.path1;
+      newStr = cachedRead(ok(p.path2)); newName = p.path2;
+    } else if (p.old != null && p.new != null) {
+      oldStr = p.old; newStr = p.new;
+    } else throw err('MISSING_PARAM', 'Need path1+path2 or old+new strings');
+    return createTwoFilesPatch(oldName, newName, oldStr, newStr);
+  },
+  // exec: execute shell commands
   // ⚠️ keep taskkill — zombie processes linger on timeout
   exec: p => {
-    checkReadonly();
     const cmd = p.args ? p.args.join(' ') : (p.cmd || '');
     if (!cmd) return '';
     const cwd = p.cwd || DATA;

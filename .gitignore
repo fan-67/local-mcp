@@ -15,4 +15,5 @@ Thumbs.db
 bash_events/
 conversations/
 project/
+temp/
 package-lock.json

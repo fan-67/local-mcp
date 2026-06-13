@@ -222,4 +222,11 @@ describe('protocol + real handlers integration', () => {
     const r = p.handleMessage({ method: 'tools/list', id: 5 });
     assert.equal(r.result.tools.length, 0);
   });
+
+  it('should handle prompts/get with missing handler', () => {
+    const p = createProtocolHandler([], {});
+    const r = p.handleMessage({ method: 'prompts/get', id: 6, params: { name: 'missing' } });
+    assert.equal(r.id, 6);
+    assert.equal(r.result.messages.length, 0);
+  });
 });

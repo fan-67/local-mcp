@@ -413,3 +413,17 @@ describe('readCache()', () => {
     assert.equal(result, 'updated content');
   });
 });
+
+describe('EXCLUDE_DIRS env', () => {
+  const orig = process.env.MCP_EXCLUDE;
+
+  it('should accept MCP_EXCLUDE env var', () => {
+    process.env.MCP_EXCLUDE = 'build,.next,custom_dir';
+    assert.equal(process.env.MCP_EXCLUDE, 'build,.next,custom_dir');
+  });
+
+  after(() => {
+    if (orig !== undefined) process.env.MCP_EXCLUDE = orig;
+    else delete process.env.MCP_EXCLUDE;
+  });
+});
