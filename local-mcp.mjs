@@ -30,15 +30,60 @@ function isBinary(fp) {
   } catch { return false; }
 }
 
-// === Excluded dirs for glob ===
+// === Excluded dirs + .gitignore ===
 const EXCLUDE_DIRS = ['node_modules', '.git', 'dist', '__pycache__', 'coverage', '.next'];
 function isExcluded(p) { return EXCLUDE_DIRS.some(d => p.includes('/' + d + '/') || p.includes('/' + d) || p.startsWith(d + '/') || p === d); }
+
+// Load .gitignore patterns from workspace root
+const GITIGNORE_PATTERNS = (() => {
+  const patterns = [];
+  try {
+    const text = readFileSync(join(WORKSPACE, '.gitignore'), 'utf-8');
+    for (const line of text.split('\n')) {
+      const t = line.trim();
+      if (!t || t.startsWith('#')) continue;
+      let p = t;
+      let neg = false;
+      if (p.startsWith('!')) { neg = true; p = p.slice(1); }
+      if (p.startsWith('/')) p = p.slice(1);
+      const dirOnly = p.endsWith('/');
+      if (dirOnly) p = p.slice(0, -1);
+      if (p) patterns.push({ p, neg, dirOnly });
+    }
+  } catch {}
+  return patterns;
+})();
+
+function isGitignored(fp) {
+  const rel = fp.startsWith(WORKSPACE) ? fp.slice(WORKSPACE.length).replace(/^\//, '') : fp;
+  let ignored = false;
+  for (const g of GITIGNORE_PATTERNS) {
+    // Simple glob match: * matches non-/ chars
+    const reStr = '^' + g.p.replace(/\*\*/g, '{{DOUBLESTAR}}').replace(/\*/g, '[^/]*').replace(/{{DOUBLESTAR}}/g, '.*') + (g.dirOnly ? '/.*' : '');
+    if (new RegExp(reStr).test(rel)) ignored = !g.neg;
+  }
+  return ignored;
+}
+
+function isSkipped(fp) { return isExcluded(fp) || isGitignored(fp); }
 
 // === Minimal line-based unified diff (LCS, zero-dep) ===
 function createTwoFilesPatch(oldName, newName, oldStr, newStr) {
   const a = oldStr.split('\n'), b = newStr.split('\n');
   const m = a.length, n = b.length;
   if (oldStr === newStr) return `--- ${oldName}\n+++ ${newName}\n`;
+
+  // For large files, fall back to simple hunk to avoid O(n*m) memory bomb
+  if (m * n > 2_000_000) {
+    const out = [`--- ${oldName}`, `+++ ${newName}`, `@@ -1,${m} +1,${n} @@`];
+    for (let i = 0; i < Math.min(m, n); i++) {
+      if (a[i] === b[i]) out.push(' ' + a[i]);
+      else { out.push('-' + a[i]); out.push('+' + b[i]); }
+    }
+    for (let i = Math.min(m, n); i < m; i++) out.push('-' + a[i]);
+    for (let i = Math.min(m, n); i < n; i++) out.push('+' + b[i]);
+    return out.join('\n');
+  }
 
   // LCS DP table (Int32Array: 4 bytes per cell, ~8MB for 1000×1000)
   const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
@@ -109,13 +154,13 @@ export function treeDir(root, maxDepth) {
   while (stack.length) {
     const { dir, pre, depth } = stack.pop();
     if (depth >= maxDepth) { result += pre + '...\n'; continue; }
-    const items = readdirSync(dir);
+    const items = readdirSync(dir, { withFileTypes: true });
     const children = [];
     for (let i = 0; i < items.length; i++) {
-      const n = items[i];
+      const entry = items[i];
       const last = i === items.length - 1;
-      result += pre + (last ? '└── ' : '├── ') + n + '\n';
-      if (statSync(join(dir, n)).isDirectory()) children.push({ dir: join(dir, n), pre: pre + (last ? '    ' : '│   '), depth: depth + 1 });
+      result += pre + (last ? '└── ' : '├── ') + entry.name + '\n';
+      if (entry.isDirectory()) children.push({ dir: join(dir, entry.name), pre: pre + (last ? '    ' : '│   '), depth: depth + 1 });
     }
     for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
   }
@@ -176,7 +221,7 @@ const tools = [
   { name: 'file', description: 'Unified file operations (action=read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'Operation: read|write|edit|append|delete|info|mkdir|move' }, path: { type: 'string', description: 'Target file path' }, content: { type: 'string', description: 'File content (for write)' }, old: { type: 'string', description: 'Text to replace (for edit)' }, new: { type: 'string', description: 'Replacement text (for edit)' }, destination: { type: 'string', description: 'Destination path (for move)' }, head: { type: 'number', description: 'Lines from start (for read)' }, tail: { type: 'number', description: 'Lines from end (for read)' }, dryRun: { type: 'boolean', description: 'Preview changes without applying' } }, required: ['action', 'path'] } },
   { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, action: { type: 'string', description: 'read|replace|insert|delete' }, range: { type: 'object', properties: { start: { type: 'number', description: 'Start line (1-based)' }, end: { type: 'number', description: 'End line (1-based)' } }, description: 'Line range' }, name: { type: 'string', description: 'Function name to locate' }, content: { type: 'string', description: 'New content' }, dryRun: { type: 'boolean', description: 'Preview diff only' } }, required: ['path', 'action'] } },
   { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'add|get|list|delete' }, name: { type: 'string', description: 'Bookmark name' }, path: { type: 'string', description: 'Path to bookmark' } }, required: ['action'] } },
-  { name: 'watch', description: 'Watch file/directory for changes (polling-based, returns new events since last call)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to file or directory to watch' }, once: { type: 'boolean', description: 'If true, returns current state and stops watching' } }, required: ['path'] } }
+  { name: 'watch', description: 'Watch file/directory for changes (event-driven, returns new events since last call)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to file or directory to watch' }, once: { type: 'boolean', description: 'If true, returns current state and stops watching' } }, required: ['path'] } }
 ];
 
 export function applyEdit(content, oldText, newText) {
@@ -231,7 +276,7 @@ async function runGrep(s, ext) {
   const q = s.toLowerCase();
   for (const e of exts) {
     const pat = e.startsWith('.') ? `**/*${e}` : `**/*.${e}`;
-    const files = globSync(pat, { cwd: WORKSPACE, exclude: isExcluded });
+    const files = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
     for (const f of files) {
       const fp = join(WORKSPACE, f);
       if (isBinary(fp)) continue;
@@ -287,7 +332,7 @@ const h = {
   search: async p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
     for (const pat of pats) {
-      const results = globSync(pat, { cwd: WORKSPACE, exclude: isExcluded });
+      const results = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
       if (results.length) return scoreResults(results, p.p);
     }
     if (!p.exclude) {
@@ -300,7 +345,7 @@ const h = {
   ls: p => {
     if (p.tree) return (p.p || 'MCP') + '/\n' + treeDir(ok(p.p || MCP_DIR), p.depth || 2);
     const d = ok(p.p || DATA);
-    let items = readdirSync(d).map(n => { const s = statSync(join(d, n)); return { n, d: s.isDirectory(), s: s.size }; });
+    const items = readdirSync(d, { withFileTypes: true }).map(e => ({ n: e.name, d: e.isDirectory(), s: e.isFile() ? statSync(join(d, e.name)).size : 0 }));
     if (p.sort === 'size') items.sort((a, b) => b.s - a.s);
     if (p.detail) return items;
     const files = items.filter(i => !i.d).length;
@@ -485,6 +530,7 @@ export function readResource(uri) {
     const items = readdirSync(resolved);
     return { uri, mimeType: 'inode/directory', text: JSON.stringify(items) };
   }
+  if (isBinary(resolved)) return { uri, mimeType: 'application/octet-stream', text: '[binary file]' };
   const text = readFileSync(resolved, 'utf-8');
   const mimeType = resolved.endsWith('.json') ? 'application/json'
     : resolved.endsWith('.md') ? 'text/markdown'
