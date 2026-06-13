@@ -4,13 +4,30 @@ A lightweight, stdio-based **MCP** (Model Context Protocol) server for local fil
 
 ## Features
 
-- **Read/Write/Edit** files with cache (FIFO, max 10) & atomic writes (temp + rename)
+- **Read/Write/Edit** files with cache (FIFO, max 10) & atomic writes (temp + rename); head+tail simultaneous reading shows start/end with omitted middle
 - **Search** files with smart scoring (glob → grep fallback)
+- **Move/Rename** files and directories
 - **List** directories with iterative tree view (stack-safe, no recursion)
 - **Execute** shell commands (bat bypass for Windows, b64 mode for complex commands)
 - **Batch** operations with atomic rollback & `$prev` result referencing
 - **Block-level** code manipulation (by function name or line range, with dry-run)
 - **Bookmark** system for path aliases (in-memory cache, persisted to JSON)
+
+All tool parameters include descriptions to help AI assistants call them correctly — no more guessing.
+
+## Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `read` | Read file, optional head/tail line limit (both = head + `...` + tail) |
+| `search` | File search by name (glob) or content (grep), exclude/ext filter |
+| `ls` | List directory; tree view (`depth=N`), sort by size, full metadata |
+| `exec` | Execute shell command; timeout, cwd, base64-encoded cmd modes |
+| `move` | Move or rename file/directory |
+| `batch` | Run multiple ops sequentially; atomic rollback, `$prev` result refs |
+| `file` | Unified: read, write, edit, append, delete, info, mkdir, move |
+| `block` | Read/replace/insert/delete code blocks by line range or function name |
+| `bookmark` | Persistent path aliases (add/get/list/delete) |
 
 ## Installation
 
@@ -54,6 +71,7 @@ Configure your AI assistant to spawn `local-mcp` as a subprocess:
 | Area | Detail |
 |------|--------|
 | **Code size** | ~16 KB, deduplicated temp-file write / cache patterns into shared helpers |
+| **Parameter docs** | All 9 tools × 50 parameter descriptions — AI assistants know exactly what to pass |
 | **Tree view** | Iterative (stack-based) instead of recursive — safe for deep directory trees |
 | **Search** | Cross-platform pure-JS grep (no Windows `findstr` dependency) |
 | **Cache** | Read cache with mtime invalidation, FIFO eviction at 10 entries |

@@ -76,14 +76,15 @@ function scoreResults(results, query) {
 }
 
 const tools = [
-  { name: 'read', description: 'Read file (head/tail to limit lines)', inputSchema: { type: 'object', properties: { path: { type: 'string' }, head: { type: 'number' }, tail: { type: 'number' } }, required: ['path'] } },
-  { name: 'search', description: 'Search (glob|grep, exclude filter, ext filter)', inputSchema: { type: 'object', properties: { p: { type: 'string' }, exclude: { type: 'string' }, ext: { type: 'string' } }, required: ['p'] } },
-  { name: 'ls', description: 'List dir (sort=size, tree view, depth=N, detail=full)', inputSchema: { type: 'object', properties: { p: { type: 'string' }, sort: { type: 'string' }, tree: { type: 'boolean' }, depth: { type: 'number' }, detail: { type: 'boolean' } } } },
-  { name: 'exec', description: 'Execute command (b64=base64, cwd=dir, t=timeout)', inputSchema: { type: 'object', properties: { cmd: { type: 'string' }, args: { type: 'array', items: { type: 'string' } }, cwd: { type: 'string' }, t: { type: 'number' }, b64: { type: 'boolean' } } } },
-  { name: 'batch', description: 'Batch ops (stopOnError, atomic rollback, $prev ref)', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' } }, stopOnError: { type: 'boolean' }, atomic: { type: 'boolean' } }, required: ['ops'] } },
-  { name: 'file', description: 'File ops (action=read|write|edit|append|delete|info|mkdir)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' }, head: { type: 'number' }, tail: { type: 'number' }, dryRun: { type: 'boolean' } }, required: ['action', 'path'] } },
-  { name: 'block', description: 'Block ops (range=line no, name=func name, dryRun=preview)', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, range: { type: 'object', properties: { start: { type: 'number' }, end: { type: 'number' } } }, name: { type: 'string' }, content: { type: 'string' }, dryRun: { type: 'boolean' } }, required: ['path', 'action'] } },
-  { name: 'bookmark', description: 'Bookmark (action=add|get|list|delete, persisted path)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } }
+  { name: 'read', description: 'Read file (head/tail to limit lines; both together shows head + ... + tail)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to file' }, head: { type: 'number', description: 'Number of lines from start' }, tail: { type: 'number', description: 'Number of lines from end' } }, required: ['path'] } },
+  { name: 'search', description: 'Search files by name or content (glob then grep)', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern (filename or path fragment)' }, exclude: { type: 'string', description: 'Glob pattern to exclude (e.g. node_modules/**)' }, ext: { type: 'string', description: 'File extension filter (e.g. .mjs .js)' } }, required: ['p'] } },
+  { name: 'ls', description: 'List directory contents', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, sort: { type: 'string', description: 'Sort order: size' }, tree: { type: 'boolean', description: 'Show tree view' }, depth: { type: 'number', description: 'Tree depth (default 2)' }, detail: { type: 'boolean', description: 'Show full metadata' } } } },
+  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command string' }, args: { type: 'array', items: { type: 'string' }, description: 'Command as args array' }, cwd: { type: 'string', description: 'Working directory' }, t: { type: 'number', description: 'Timeout in seconds (default 30)' }, b64: { type: 'boolean', description: 'Base64 decode cmd before execution' } } } },
+  { name: 'move', description: 'Move or rename file/directory', inputSchema: { type: 'object', properties: { source: { type: 'string', description: 'Source path' }, destination: { type: 'string', description: 'Destination path' } }, required: ['source', 'destination'] } },
+  { name: 'batch', description: 'Batch multiple operations with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' }, description: 'Array of operations' }, stopOnError: { type: 'boolean', description: 'Stop on first error (default true)' }, atomic: { type: 'boolean', description: 'Rollback all on failure' } }, required: ['ops'] } },
+  { name: 'file', description: 'Unified file operations (action=read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'Operation: read|write|edit|append|delete|info|mkdir|move' }, path: { type: 'string', description: 'Target file path' }, content: { type: 'string', description: 'File content (for write)' }, old: { type: 'string', description: 'Text to replace (for edit)' }, new: { type: 'string', description: 'Replacement text (for edit)' }, destination: { type: 'string', description: 'Destination path (for move)' }, head: { type: 'number', description: 'Lines from start (for read)' }, tail: { type: 'number', description: 'Lines from end (for read)' }, dryRun: { type: 'boolean', description: 'Preview changes without applying' } }, required: ['action', 'path'] } },
+  { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, action: { type: 'string', description: 'read|replace|insert|delete' }, range: { type: 'object', properties: { start: { type: 'number', description: 'Start line (1-based)' }, end: { type: 'number', description: 'End line (1-based)' } }, description: 'Line range' }, name: { type: 'string', description: 'Function name to locate' }, content: { type: 'string', description: 'New content' }, dryRun: { type: 'boolean', description: 'Preview diff only' } }, required: ['path', 'action'] } },
+  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'add|get|list|delete' }, name: { type: 'string', description: 'Bookmark name' }, path: { type: 'string', description: 'Path to bookmark' } }, required: ['action'] } }
 ];
 
 function applyEdit(content, oldText, newText) {
@@ -163,8 +164,13 @@ const h = {
   read: p => {
     const f = ok(p.path);
     let c = cachedRead(f);
-    if (p.head) c = c.split('\n').slice(0, p.head).join('\n');
-    if (p.tail) c = c.split('\n').slice(-p.tail).join('\n');
+    const lines = c.split('\n');
+    if (p.head && p.tail) {
+      if (p.head + p.tail >= lines.length) return c;
+      return lines.slice(0, p.head).join('\n') + `\n... (${lines.length - p.head - p.tail} lines omitted) ...\n` + lines.slice(-p.tail).join('\n');
+    }
+    if (p.head) return lines.slice(0, p.head).join('\n');
+    if (p.tail) return lines.slice(-p.tail).join('\n');
     return c;
   },
   write: p => { atomicWrite(ok(p.path), p.content); updateCache(ok(p.path)); return 'ok'; },
@@ -179,6 +185,7 @@ const h = {
     return compactDiff(diff);
   },
   append: p => { appendFileSync(ok(p.path), p.content, 'utf-8'); invalidateCache(ok(p.path)); return 'ok'; },
+  move: p => { renameSync(ok(p.source), ok(p.destination)); invalidateCache(ok(p.source)); return 'ok'; },
   search: p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
     for (const pat of pats) {
@@ -268,13 +275,14 @@ const h = {
       case 'write': return h.write(p);
       case 'edit': return h.edit(p);
       case 'append': return h.append(p);
+      case 'move': renameSync(ok(p.path), ok(p.destination)); invalidateCache(ok(p.path)); return 'ok';
       case 'mkdir': mkdirSync(ok(p.path), { recursive: true }); return 'ok';
       case 'delete': rmSync(ok(p.path), { recursive: true, force: true }); return 'ok';
       case 'info': {
         const s = statSync(ok(p.path));
         return { size: s.size, mtime: s.mtime.toISOString(), isDir: s.isDirectory(), isFile: s.isFile() };
       }
-      default: throw err("INVALID_ACTION", "action: read|write|edit|append|delete|info|mkdir");
+      default: throw err("INVALID_ACTION", "action: read|write|edit|append|delete|move|info|mkdir");
     }
   },
   block: p => {
