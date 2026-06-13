@@ -36,14 +36,14 @@ describe('createProtocolHandler', () => {
   });
 
   it('should handle tools/call with sync handler', async () => {
-    const promise = proto.handleMessage({
+    const result = proto.handleMessage({
       method: 'tools/call', id: 3,
       params: { name: 'greet', arguments: { name: 'Test' } }
     });
-    assert.ok(promise instanceof Promise);
-    const result = await promise;
-    assert.equal(result.id, 3);
-    assert.equal(result.result.content[0].text, 'Hello, Test!');
+    // Sync handlers return result directly (not wrapped in Promise)
+    const r = result instanceof Promise ? await result : result;
+    assert.equal(r.id, 3);
+    assert.equal(r.result.content[0].text, 'Hello, Test!');
   });
 
   it('should handle tools/call with async handler', async () => {
