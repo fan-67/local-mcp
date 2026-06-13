@@ -223,6 +223,18 @@ export function pathToFileUri(p) {
 // === Watch state ===
 const watchers = new Map();
 let watchEventId = 0;
+const MAX_WATCHERS = 20;
+
+function cleanupWatchers() {
+  for (const [key, entry] of watchers) {
+    try { entry.w.close(); } catch {}
+    watchers.delete(key);
+  }
+}
+
+process.on('exit', cleanupWatchers);
+process.on('SIGINT', () => { cleanupWatchers(); process.exit(0); });
+process.on('SIGTERM', () => { cleanupWatchers(); process.exit(0); });
 
 // === Iterative directory tree (stack-safe, no recursion) ===
 export function treeDir(root, maxDepth) {
@@ -630,6 +642,11 @@ const h = {
 
     // Start watching if not already
     if (!watchers.has(key)) {
+      // Evict oldest if at limit
+      if (watchers.size >= MAX_WATCHERS) {
+        const oldest = watchers.keys().next().value;
+        if (oldest) { try { watchers.get(oldest).w.close(); } catch {} watchers.delete(oldest); }
+      }
       const events = [];
       const w = fsWatch(target, { recursive: stat.isDirectory() }, (eventType, filename) => {
         events.push({ id: ++watchEventId, type: eventType, file: filename || '', time: new Date().toISOString() });
