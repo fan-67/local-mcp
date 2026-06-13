@@ -8,6 +8,7 @@ import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 
 // === Exported for testing ===
 export { createProtocolHandler as _createProtocolHandler };
+export { isBinary as _isBinary, ok as _ok, isExcluded as _isExcluded, sanitizeKey as _sanitizeKey, atomicWrite as _atomicWrite, cachedRead as _cachedRead, invalidateCache as _invalidateCache };
 
 // === Read-only mode ===
 const READONLY = process.env.MCP_READONLY === 'true' || process.env.MCP_READONLY === '1';

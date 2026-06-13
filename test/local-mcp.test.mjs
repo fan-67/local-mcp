@@ -1,14 +1,16 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'fs';
 import { join } from 'path';
-import { tmpdir } from 'os';
 import { WORKSPACE } from '../lib/config.mjs';
 
 // Import functions from local-mcp.mjs
 import {
   nl, compactDiff, applyEdit, fileUriToPath, pathToFileUri,
-  treeDir, findBlock, listResources, readResource
+  treeDir, findBlock, listResources, readResource, scoreResults,
+  _isBinary as isBinary, _ok as ok, _isExcluded as isExcluded,
+  _sanitizeKey as sanitizeKey, _atomicWrite as atomicWrite,
+  _cachedRead as cachedRead, _invalidateCache as invalidateCache
 } from '../local-mcp.mjs';
 
 describe('nl()', () => {
@@ -245,5 +247,169 @@ describe('readResource()', () => {
     const result = readResource('file://' + tmpDir);
     assert.equal(result.mimeType, 'inode/directory');
     assert.ok(typeof result.text === 'string');
+  });
+});
+
+describe('readResource() MIME types', () => {
+  let tmpDir;
+  before(() => {
+    tmpDir = mkdtempSync(join(WORKSPACE, '.mime-test-'));
+    writeFileSync(join(tmpDir, 'readme.md'), '# Title\ncontent');
+    writeFileSync(join(tmpDir, 'script.js'), 'const x = 1;');
+    writeFileSync(join(tmpDir, 'plain.txt'), 'plain text');
+  });
+  after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('should detect markdown mime type', () => {
+    const result = readResource('file://' + join(tmpDir, 'readme.md'));
+    assert.equal(result.mimeType, 'text/markdown');
+  });
+
+  it('should detect javascript mime type', () => {
+    const result = readResource('file://' + join(tmpDir, 'script.js'));
+    assert.equal(result.mimeType, 'text/javascript');
+  });
+
+  it('should detect text mime type for plain txt', () => {
+    const result = readResource('file://' + join(tmpDir, 'plain.txt'));
+    assert.equal(result.mimeType, 'text/plain');
+  });
+});
+
+describe('scoreResults()', () => {
+  it('should sort by relevance with exact match first', () => {
+    const result = scoreResults(['src/util.js', 'util.js', 'test/util.test.js'], 'util.js');
+    assert.equal(result[0], 'util.js');
+  });
+
+  it('should return empty array for empty input', () => {
+    assert.deepEqual(scoreResults([], 'query'), []);
+  });
+
+  it('should handle single result', () => {
+    const result = scoreResults(['file.txt'], 'file');
+    assert.deepEqual(result, ['file.txt']);
+  });
+
+  it('should prefer shorter paths on equal scores', () => {
+    const result = scoreResults(['src/a/deep/file.js', 'file.js'], 'file.js');
+    assert.equal(result[0], 'file.js');
+  });
+});
+
+describe('isBinary()', () => {
+  let tmpDir;
+  before(() => {
+    tmpDir = mkdtempSync(join(WORKSPACE, '.bin-test-'));
+    writeFileSync(join(tmpDir, 'text.txt'), 'hello world');
+    // Write a file with a null byte
+    const buf = Buffer.alloc(16);
+    buf.write('text\x00binary');
+    writeFileSync(join(tmpDir, 'binary.bin'), buf);
+  });
+  after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('should return false for text files', () => {
+    assert.equal(isBinary(join(tmpDir, 'text.txt')), false);
+  });
+
+  it('should return true for files with null bytes', () => {
+    assert.equal(isBinary(join(tmpDir, 'binary.bin')), true);
+  });
+});
+
+describe('ok() path validation', () => {
+  it('should resolve paths under workspace', () => {
+    const result = ok(WORKSPACE);
+    assert.equal(result, WORKSPACE);
+  });
+
+  it('should throw PERMISSION_DENIED for paths outside workspace', () => {
+    assert.throws(
+      () => ok('/tmp/outside'),
+      e => e.type === 'PERMISSION_DENIED'
+    );
+  });
+});
+
+describe('sanitizeKey()', () => {
+  it('should allow normal keys', () => {
+    assert.equal(sanitizeKey('my-bookmark'), 'my-bookmark');
+  });
+
+  it('should throw FORBIDDEN_KEY for __proto__', () => {
+    assert.throws(
+      () => sanitizeKey('__proto__'),
+      e => e.type === 'FORBIDDEN_KEY'
+    );
+  });
+
+  it('should throw FORBIDDEN_KEY for constructor', () => {
+    assert.throws(
+      () => sanitizeKey('constructor'),
+      e => e.type === 'FORBIDDEN_KEY'
+    );
+  });
+
+  it('should throw FORBIDDEN_KEY for prototype', () => {
+    assert.throws(
+      () => sanitizeKey('prototype'),
+      e => e.type === 'FORBIDDEN_KEY'
+    );
+  });
+});
+
+describe('isExcluded()', () => {
+  it('should exclude node_modules directory', () => {
+    assert.equal(isExcluded('/workspace/node_modules/pkg/index.js'), true);
+  });
+
+  it('should exclude .git directory', () => {
+    assert.equal(isExcluded('/workspace/.git/HEAD'), true);
+  });
+
+  it('should not exclude regular files', () => {
+    assert.equal(isExcluded('/workspace/src/index.js'), false);
+  });
+});
+
+describe('atomicWrite() with directory', () => {
+  let tmpDir;
+  before(() => {
+    tmpDir = mkdtempSync(join(WORKSPACE, '.atomic-test-'));
+  });
+  after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('should throw IS_DIRECTORY when writing to an existing directory', () => {
+    assert.throws(
+      () => atomicWrite(tmpDir, 'content'),
+      e => e.type === 'IS_DIRECTORY'
+    );
+  });
+});
+
+describe('readCache()', () => {
+  let testFile;
+  let tmpDir;
+  before(() => {
+    tmpDir = mkdtempSync(join(WORKSPACE, '.cache-test-'));
+    testFile = join(tmpDir, 'cached.txt');
+    writeFileSync(testFile, 'cached content');
+    // Prime the cache
+    cachedRead(testFile);
+  });
+  after(() => { rmSync(tmpDir, { recursive: true, force: true }); });
+
+  it('should return cached content on repeated read', () => {
+    const first = cachedRead(testFile);
+    const second = cachedRead(testFile);
+    assert.equal(first, second);
+  });
+
+  it('should return updated content after invalidation', () => {
+    invalidateCache(testFile);
+    writeFileSync(testFile, 'updated content');
+    const result = cachedRead(testFile);
+    assert.equal(result, 'updated content');
   });
 });

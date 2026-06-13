@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test';
+import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { createProtocolHandler } from '../lib/mcp-core.mjs';
 
@@ -184,5 +184,42 @@ describe('createProtocolHandler', () => {
     const result = await promise;
     assert.equal(result.id, 100);
     assert.equal(result.result.content[0].text, 'Hello, world!');
+  });
+});
+
+describe('protocol + real handlers integration', () => {
+  it('should handle initialize with protocol version echo', () => {
+    const h = { greet: p => `Hello ${p?.name || 'world'}` };
+    const p = createProtocolHandler([{ name: 'greet', inputSchema: {} }], h);
+    const r = p.handleMessage({ method: 'initialize', id: 1, params: { protocolVersion: '2025-03-26' } });
+    assert.equal(r.result.protocolVersion, '2025-03-26');
+  });
+
+  it('should handle tools/call with handler returning error object', async () => {
+    const h = { risky: () => { const e = new Error('fail'); e.type = 'MY_ERROR'; throw e; } };
+    const p = createProtocolHandler([{ name: 'risky', inputSchema: {} }], h);
+    const r = await p.handleMessage({ method: 'tools/call', id: 2, params: { name: 'risky', arguments: {} } });
+    assert.ok(r.result.isError);
+    assert.ok(r.result.content[0].text.includes('fail'));
+  });
+
+  it('should handle resources/read with async handler', async () => {
+    const h = { _readResource: async uri => ({ uri, mimeType: 'text/plain', text: 'async ' + uri }) };
+    const p = createProtocolHandler([], h);
+    const r = await p.handleMessage({ method: 'resources/read', id: 3, params: { uri: 'file:///test' } });
+    assert.equal(r.result.contents[0].text, 'async file:///test');
+  });
+
+  it('should return null for notifications/ methods even with id', () => {
+    const h = {};
+    const p = createProtocolHandler([], h);
+    const r = p.handleMessage({ method: 'notifications/initialized', id: 4 });
+    assert.equal(r, null);
+  });
+
+  it('should handle tools/list with an empty tool list', () => {
+    const p = createProtocolHandler([], {});
+    const r = p.handleMessage({ method: 'tools/list', id: 5 });
+    assert.equal(r.result.tools.length, 0);
   });
 });
