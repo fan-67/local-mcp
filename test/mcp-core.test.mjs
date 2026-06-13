@@ -132,8 +132,21 @@ describe('createProtocolHandler', () => {
     assert.deepEqual(result.result, {});
   });
 
+  it('should handle resources/templates/list', () => {
+    const customHandlers = {
+      _resourceTemplates: () => [
+        { uriTemplate: 'file:///workspace/**', name: 'All files', description: 'test' }
+      ]
+    };
+    const proto2 = createProtocolHandler(tools, customHandlers);
+    const result = proto2.handleMessage({ method: 'resources/templates/list', id: 12 });
+    assert.equal(result.id, 12);
+    assert.equal(result.result.resourceTemplates.length, 1);
+    assert.equal(result.result.resourceTemplates[0].uriTemplate, 'file:///workspace/**');
+  });
+
   it('should return null for unknown methods', () => {
-    const result = proto.handleMessage({ method: 'unknown', id: 12 });
+    const result = proto.handleMessage({ method: 'unknown', id: 99 });
     assert.equal(result, null);
   });
 
@@ -144,11 +157,11 @@ describe('createProtocolHandler', () => {
 
   it('should handle tools/call with no arguments', async () => {
     const promise = proto.handleMessage({
-      method: 'tools/call', id: 12,
+      method: 'tools/call', id: 100,
       params: { name: 'greet' }
     });
     const result = await promise;
-    assert.equal(result.id, 12);
+    assert.equal(result.id, 100);
     assert.equal(result.result.content[0].text, 'Hello, world!');
   });
 });

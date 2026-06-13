@@ -727,6 +727,12 @@ export function readResource(uri) {
 
 h._resources = listResources;
 h._readResource = readResource;
+h._resourceTemplates = () => {
+  const ws = pathToFileUri(WORKSPACE);
+  return [
+    { uriTemplate: ws + '/**', name: 'Workspace files', description: 'All files under workspace, matched by glob pattern' }
+  ];
+};
 
 // === CLI ===
 // Only start server when run directly, not when imported for testing
