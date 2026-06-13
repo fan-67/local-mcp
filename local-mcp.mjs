@@ -494,10 +494,8 @@ const h = {
       const results = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
       if (results.length) return scoreResults(results, p.p);
     }
-    if (!p.exclude) {
-      const found = await runGrep(p.p, p.ext || '.mjs .js');
-      if (found.length) return scoreResults(found, p.p);
-    }
+    const found = await runGrep(p.p, p.ext || '.mjs .js');
+    if (found.length) return scoreResults(found, p.p);
     return [];
   },
   grep: p => runGrep(p.s, p.ext),
