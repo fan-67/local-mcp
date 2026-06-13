@@ -68,69 +68,145 @@ function isGitignored(fp) {
 
 function isSkipped(fp) { return isExcluded(fp) || isGitignored(fp); }
 
-// === Minimal line-based unified diff (LCS, zero-dep) ===
-function createTwoFilesPatch(oldName, newName, oldStr, newStr) {
-  const a = oldStr.split('\n'), b = newStr.split('\n');
-  const m = a.length, n = b.length;
-  if (oldStr === newStr) return `--- ${oldName}\n+++ ${newName}\n`;
+// === Myers' diff (O(N*D) time, O(N+M) space, zero-dep) ===
+// Produces same unified diff format as GNU diff -u
+function myersEditOps(a, b) {
+  // Returns [{ t: 'k'|'i'|'d', l: line }] in forward order
+  const n = a.length, m = b.length;
+  if (n === 0 && m === 0) return [];
+  if (n === 0) return b.map(l => ({ t: 'i', l }));
+  if (m === 0) return a.map(l => ({ t: 'd', l }));
 
-  // For large files, fall back to simple hunk to avoid O(n*m) memory bomb
-  if (m * n > 2_000_000) {
-    const out = [`--- ${oldName}`, `+++ ${newName}`, `@@ -1,${m} +1,${n} @@`];
-    for (let i = 0; i < Math.min(m, n); i++) {
-      if (a[i] === b[i]) out.push(' ' + a[i]);
-      else { out.push('-' + a[i]); out.push('+' + b[i]); }
+  const max = n + m;
+  const V = new Int32Array(2 * max + 1);
+  const trace = [];
+
+  // Forward pass: find minimal edit distance D
+  let D;
+  for (let d = 0; d <= max; d++) {
+    trace.push(new Int32Array(V));
+    for (let k = -d; k <= d; k += 2) {
+      const idx = k + max;
+      let x;
+      if (k === -d || (k !== d && V[idx - 1] < V[idx + 1])) {
+        x = V[idx + 1]; // from k+1: vertical move (insert from b)
+      } else {
+        x = V[idx - 1] + 1; // from k-1: horizontal move (delete from a)
+      }
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
+      V[idx] = x;
+      if (x === n && y === m) { D = d; break; }
     }
-    for (let i = Math.min(m, n); i < m; i++) out.push('-' + a[i]);
-    for (let i = Math.min(m, n); i < n; i++) out.push('+' + b[i]);
-    return out.join('\n');
+    if (D !== undefined) break;
   }
 
-  // LCS DP table (Int32Array: 4 bytes per cell, ~8MB for 1000×1000)
-  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
-  for (let i = 1; i <= m; i++) {
-    const ai = a[i - 1], dpi = dp[i], dpm = dp[i - 1];
-    for (let j = 1; j <= n; j++) dpi[j] = ai === b[j - 1] ? dpm[j - 1] + 1 : (dpm[j] > dpi[j - 1] ? dpm[j] : dpi[j - 1]);
-  }
-
-  // Traceback: 0=keep, 1=insert, 2=delete
+  // Backtrack through trace to build ops (in reverse)
   const ops = [];
-  let i = m, j = n;
-  while (i > 0 || j > 0) {
-    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) { ops.push(0); i--; j--; }
-    else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { ops.push(1); j--; }
-    else { ops.push(2); i--; }
-  }
-  ops.reverse();
+  let x = n, y = m;
+  for (let d = D; d > 0; d--) {
+    const prevV = trace[d - 1];
+    const k = x - y;
+    const idx = k + max;
 
-  // Build unified diff hunks
+    // Unwind diagonal snake
+    while (x > 0 && y > 0 && a[x - 1] === b[y - 1]) {
+      ops.push({ t: 'k', l: a[x - 1] });
+      x--; y--;
+    }
+
+    // Determine which diagonal we came from at depth d-1
+    // Must match forward pass rule: k === -d || (k !== d && V[idx-1] < V[idx+1])
+    // means came from k+1 (insert), else from k-1 (delete)
+    if (k === -d || (k !== d && prevV[idx - 1] < prevV[idx + 1])) {
+      // Came from k+1: was an insert from b
+      ops.push({ t: 'i', l: b[y - 1] });
+      y--;
+    } else {
+      // Came from k-1: was a delete from a
+      ops.push({ t: 'd', l: a[x - 1] });
+      x--;
+    }
+  }
+  // Remaining diagonal at d=0
+  while (x > 0 && y > 0 && a[x - 1] === b[y - 1]) {
+    ops.push({ t: 'k', l: a[x - 1] });
+    x--; y--;
+  }
+
+  return ops.reverse();
+}
+
+function buildUnifiedDiff(a, b, oldName, newName) {
+  // Use Myers if total lines < 2000, fall back to simple for large files
+  const n = a.length, m = b.length;
+  if (n * m > 4_000_000) {
+    return buildSimpleDiff(a, b, oldName, newName);
+  }
+  const ops = myersEditOps(a, b);
+
+  const hasChanges = ops.some(o => o.t !== 'k');
+  if (!hasChanges) return `--- ${oldName}\n+++ ${newName}\n`;
+
   const out = [`--- ${oldName}`, `+++ ${newName}`];
   let ai = 0, bi = 0, pos = 0;
+
   while (pos < ops.length) {
-    while (pos < ops.length && ops[pos] === 0) { pos++; ai++; bi++; }
+    // Skip keep ops
+    while (pos < ops.length && ops[pos].t === 'k') { pos++; ai++; bi++; }
     if (pos >= ops.length) break;
+
+    // Context before: up to 3 keep ops (all ops before pos are keep ops)
     const ctxBefore = Math.min(3, pos);
     const hunkStart = pos - ctxBefore;
-    let ctxCount = 0, hunkEnd = pos;
+    ai -= ctxBefore;
+    bi -= ctxBefore;
+
+    // Find end of hunk: up to 3 context lines after changes
+    let ctxAfter = 0, hunkEnd = pos;
     while (hunkEnd < ops.length) {
-      if (ops[hunkEnd] === 0) { ctxCount++; if (ctxCount > 3) break; }
-      else ctxCount = 0;
+      if (ops[hunkEnd].t === 'k') { ctxAfter++; if (ctxAfter > 3) break; }
+      else ctxAfter = 0;
       hunkEnd++;
     }
-    if (ctxCount > 3) hunkEnd -= (ctxCount - 3);
-    const hunkAi = ai - (pos - hunkStart);
-    const hunkBi = bi - (pos - hunkStart);
+    if (ctxAfter > 3) hunkEnd -= (ctxAfter - 3);
+
+    // Calculate hunk header
     let oldLen = 0, newLen = 0;
-    for (let k = hunkStart; k < hunkEnd; k++) { if (ops[k] !== 1) oldLen++; if (ops[k] !== 2) newLen++; }
-    out.push(`@@ -${hunkAi + 1},${oldLen} +${hunkBi + 1},${newLen} @@`);
     for (let k = hunkStart; k < hunkEnd; k++) {
-      if (ops[k] === 0) { out.push(' ' + a[ai]); ai++; bi++; }
-      else if (ops[k] === 2) { out.push('-' + a[ai]); ai++; }
+      if (ops[k].t !== 'i') oldLen++;
+      if (ops[k].t !== 'd') newLen++;
+    }
+    out.push(`@@ -${ai + 1},${oldLen} +${bi + 1},${newLen} @@`);
+
+    // Emit hunk lines
+    for (let k = hunkStart; k < hunkEnd; k++) {
+      const o = ops[k];
+      if (o.t === 'k') { out.push(' ' + a[ai]); ai++; bi++; }
+      else if (o.t === 'd') { out.push('-' + a[ai]); ai++; }
       else { out.push('+' + b[bi]); bi++; }
     }
     pos = hunkEnd;
   }
   return out.join('\n');
+}
+
+function buildSimpleDiff(a, b, oldName, newName) {
+  const n = a.length, m = b.length;
+  const out = [`--- ${oldName}`, `+++ ${newName}`, `@@ -1,${n} +1,${m} @@`];
+  for (let i = 0; i < Math.min(n, m); i++) {
+    if (a[i] === b[i]) out.push(' ' + a[i]);
+    else { out.push('-' + a[i]); out.push('+' + b[i]); }
+  }
+  for (let i = Math.min(n, m); i < n; i++) out.push('-' + a[i]);
+  for (let i = Math.min(n, m); i < m; i++) out.push('+' + b[i]);
+  return out.join('\n');
+}
+
+function createTwoFilesPatch(oldName, newName, oldStr, newStr) {
+  const a = oldStr.split('\n'), b = newStr.split('\n');
+  if (oldStr === newStr) return `--- ${oldName}\n+++ ${newName}\n`;
+  return buildUnifiedDiff(a, b, oldName, newName);
 }
 
 // === File URI helpers ===
