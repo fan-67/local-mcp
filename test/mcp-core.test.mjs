@@ -22,7 +22,7 @@ describe('createProtocolHandler', () => {
   it('should handle initialize and return capabilities', () => {
     const result = proto.handleMessage({ method: 'initialize', id: 1 });
     assert.equal(result.id, 1);
-    assert.equal(result.result.protocolVersion, '2024-11-05');
+    assert.equal(result.result.protocolVersion, '2025-11-25');
     assert.equal(result.result.serverInfo.name, 'local-mcp');
     assert.ok(result.result.capabilities.tools);
     assert.ok(result.result.capabilities.resources);
