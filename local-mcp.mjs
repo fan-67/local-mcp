@@ -313,16 +313,28 @@ export function compactDiff(diff) {
 
 export function scoreResults(results, query) {
   const q = query.toLowerCase();
-  return results.map(r => {
+  // Score by name match first (no statSync)
+  const scored = results.map(r => {
     let s = 0;
     const n = r.split('/').pop().toLowerCase();
     if (n === q) s += 20;
     else if (n.includes(q)) s += 10;
     else for (let i = 0; i < q.length && i < n.length; i++) if (n[i] === q[i]) s += 2;
     s -= r.split('/').length;
-    try { const st = statSync(join(WORKSPACE, r)); const age = Date.now() - st.mtimeMs; if (age < 3600000) s += 5; else if (age < 86400000) s += 3; else if (age < 604800000) s += 1; } catch {}
     return { r, s };
-  }).sort((a, b) => b.s - a.s).map(x => x.r);
+  }).sort((a, b) => b.s - a.s);
+  // Only stat top candidates for mtime bonus (avoids N statSync calls)
+  const TOP_N = 50;
+  for (let i = 0; i < Math.min(TOP_N, scored.length); i++) {
+    try {
+      const st = statSync(join(WORKSPACE, scored[i].r));
+      const age = Date.now() - st.mtimeMs;
+      if (age < 3600000) scored[i].s += 5;
+      else if (age < 86400000) scored[i].s += 3;
+      else if (age < 604800000) scored[i].s += 1;
+    } catch {}
+  }
+  return scored.sort((a, b) => b.s - a.s).map(x => x.r);
 }
 
 const _toolCatalog = [
