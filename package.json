@@ -1,6 +1,6 @@
 {
   "name": "local-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Local file system MCP server — read, edit, search, exec tools for AI assistants via stdin/stdout",
   "type": "module",
   "main": "local-mcp.mjs",

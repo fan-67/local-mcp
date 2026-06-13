@@ -1,15 +1,36 @@
-import { serve } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync } from 'fs';
+import { serve, serveHttp } from './lib/mcp-core.mjs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync, watch as fsWatch } from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import { resolve, join } from 'path';
 import { globSync } from 'glob';
 import { createTwoFilesPatch } from 'diff';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 
+// === Read-only mode ===
+const READONLY = process.env.MCP_READONLY === 'true' || process.env.MCP_READONLY === '1';
+function checkReadonly() {
+  if (READONLY) throw err('READONLY_MODE', 'Write operations are disabled (MCP_READONLY=true)');
+}
+
 const ALLOW = [resolve(WORKSPACE + '/')];
 function ok(p) { const f = resolve(p); if (!ALLOW.some(a => f.startsWith(a))) throw err("PERMISSION_DENIED", `Path must be under ${WORKSPACE}/`); return f; }
 function err(t, msg) { const e = new Error(msg); e.code = e.type = t; return e; }
 function nl(t) { return (t || '').replace(/\r\n/g, '\n'); }
+
+// === File URI helpers ===
+function fileUriToPath(uri) {
+  if (!uri.startsWith('file://')) throw err('INVALID_URI', 'Only file:// URIs are supported');
+  const p = decodeURIComponent(uri.slice(7));
+  return process.platform === 'win32' ? p.replace(/^\/([a-zA-Z]):\//, '$1:\\') : p;
+}
+function pathToFileUri(p) {
+  const abs = resolve(p);
+  return 'file://' + (process.platform === 'win32' ? '/' + abs.replace(/\\/g, '/') : abs);
+}
+
+// === Watch state ===
+const watchers = new Map();
+let watchEventId = 0;
 
 // === Iterative directory tree (stack-safe, no recursion) ===
 function treeDir(root, maxDepth) {
@@ -84,7 +105,8 @@ const tools = [
   { name: 'batch', description: 'Batch multiple operations with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' }, description: 'Array of operations' }, stopOnError: { type: 'boolean', description: 'Stop on first error (default true)' }, atomic: { type: 'boolean', description: 'Rollback all on failure' } }, required: ['ops'] } },
   { name: 'file', description: 'Unified file operations (action=read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'Operation: read|write|edit|append|delete|info|mkdir|move' }, path: { type: 'string', description: 'Target file path' }, content: { type: 'string', description: 'File content (for write)' }, old: { type: 'string', description: 'Text to replace (for edit)' }, new: { type: 'string', description: 'Replacement text (for edit)' }, destination: { type: 'string', description: 'Destination path (for move)' }, head: { type: 'number', description: 'Lines from start (for read)' }, tail: { type: 'number', description: 'Lines from end (for read)' }, dryRun: { type: 'boolean', description: 'Preview changes without applying' } }, required: ['action', 'path'] } },
   { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, action: { type: 'string', description: 'read|replace|insert|delete' }, range: { type: 'object', properties: { start: { type: 'number', description: 'Start line (1-based)' }, end: { type: 'number', description: 'End line (1-based)' } }, description: 'Line range' }, name: { type: 'string', description: 'Function name to locate' }, content: { type: 'string', description: 'New content' }, dryRun: { type: 'boolean', description: 'Preview diff only' } }, required: ['path', 'action'] } },
-  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'add|get|list|delete' }, name: { type: 'string', description: 'Bookmark name' }, path: { type: 'string', description: 'Path to bookmark' } }, required: ['action'] } }
+  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'add|get|list|delete' }, name: { type: 'string', description: 'Bookmark name' }, path: { type: 'string', description: 'Path to bookmark' } }, required: ['action'] } },
+  { name: 'watch', description: 'Watch file/directory for changes (polling-based, returns new events since last call)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to file or directory to watch' }, once: { type: 'boolean', description: 'If true, returns current state and stops watching' } }, required: ['path'] } }
 ];
 
 function applyEdit(content, oldText, newText) {
@@ -173,8 +195,9 @@ const h = {
     if (p.tail) return lines.slice(-p.tail).join('\n');
     return c;
   },
-  write: p => { atomicWrite(ok(p.path), p.content); updateCache(ok(p.path)); return 'ok'; },
+  write: p => { checkReadonly(); atomicWrite(ok(p.path), p.content); updateCache(ok(p.path)); return 'ok'; },
   edit: p => {
+    checkReadonly();
     const f = ok(p.path);
     const nc = nl(readFileSync(f, 'utf-8'));
     const modified = applyEdit(nc, p.old, p.new);
@@ -184,8 +207,8 @@ const h = {
     updateCache(f);
     return compactDiff(diff);
   },
-  append: p => { appendFileSync(ok(p.path), p.content, 'utf-8'); invalidateCache(ok(p.path)); return 'ok'; },
-  move: p => { renameSync(ok(p.source), ok(p.destination)); invalidateCache(ok(p.source)); return 'ok'; },
+  append: p => { checkReadonly(); appendFileSync(ok(p.path), p.content, 'utf-8'); invalidateCache(ok(p.path)); return 'ok'; },
+  move: p => { checkReadonly(); renameSync(ok(p.source), ok(p.destination)); invalidateCache(ok(p.source)); return 'ok'; },
   search: p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
     for (const pat of pats) {
@@ -217,6 +240,7 @@ const h = {
   // b64: base64 → PowerShell decode, bypass cmd escaping; batch embedded exec unaffected
   // ⚠️ keep taskkill — zombie processes linger on timeout
   exec: p => {
+    checkReadonly();
     const cmd = p.args ? p.args.join(' ') : (p.cmd || '');
     if (!cmd) return '';
     const cwd = p.cwd || DATA;
@@ -238,6 +262,7 @@ const h = {
     return (child.stdout || '').trim();
   },
   batch: p => {
+    checkReadonly();
     const results = [];
     let prev = null;
     const backups = new Map();
@@ -272,12 +297,12 @@ const h = {
   file: p => {
     switch (p.action) {
       case 'read': return h.read(p);
-      case 'write': return h.write(p);
-      case 'edit': return h.edit(p);
-      case 'append': return h.append(p);
-      case 'move': renameSync(ok(p.path), ok(p.destination)); invalidateCache(ok(p.path)); return 'ok';
-      case 'mkdir': mkdirSync(ok(p.path), { recursive: true }); return 'ok';
-      case 'delete': rmSync(ok(p.path), { recursive: true, force: true }); return 'ok';
+      case 'write': checkReadonly(); return h.write(p);
+      case 'edit': checkReadonly(); return h.edit(p);
+      case 'append': checkReadonly(); return h.append(p);
+      case 'move': checkReadonly(); renameSync(ok(p.path), ok(p.destination)); invalidateCache(ok(p.path)); return 'ok';
+      case 'mkdir': checkReadonly(); mkdirSync(ok(p.path), { recursive: true }); return 'ok';
+      case 'delete': checkReadonly(); rmSync(ok(p.path), { recursive: true, force: true }); return 'ok';
       case 'info': {
         const s = statSync(ok(p.path));
         return { size: s.size, mtime: s.mtime.toISOString(), isDir: s.isDirectory(), isFile: s.isFile() };
@@ -301,6 +326,7 @@ const h = {
     if (rStart < 0 || rEnd >= lines.length) throw err("OUT_OF_RANGE", `Line range out of bounds: ${rStart + 1}-${rEnd + 1} (file has ${lines.length} lines)`);
     const act = p.action;
     if (act === 'read') return lines.slice(rStart, rEnd + 1).join('\n');
+    if (['replace', 'insert', 'delete'].includes(act)) checkReadonly();
     const before = lines.slice(0, rStart).join('\n');
     const after = lines.slice(rEnd + 1).join('\n');
     const blockStr = lines.slice(rStart, rEnd + 1).join('\n');
@@ -323,6 +349,7 @@ const h = {
     const bm = loadBookmarks();
     switch (p.action) {
       case 'add':
+        checkReadonly();
         if (!p.name || !p.path) throw err("MISSING_PARAM", "Need name and path");
         bm[p.name] = ok(p.path); saveBookmarks(bm); return 'ok';
       case 'get':
@@ -330,10 +357,81 @@ const h = {
         return bm[p.name] || null;
       case 'list': return bm;
       case 'delete':
+        checkReadonly();
         if (!p.name) throw err("MISSING_PARAM", "Need name");
         delete bm[p.name]; saveBookmarks(bm); return 'ok';
       default: throw err("INVALID_ACTION", "action: add|get|list|delete");
     }
+  },
+  watch: p => {
+    const target = ok(p.path);
+    const stat = statSync(target);
+    const key = resolve(target);
+
+    if (p.once) {
+      // Return current state and stop watching
+      if (watchers.has(key)) {
+        const entry = watchers.get(key);
+        entry.w.close();
+        watchers.delete(key);
+      }
+      return { watched: key, isDir: stat.isDirectory(), stopped: true };
+    }
+
+    // Start watching if not already
+    if (!watchers.has(key)) {
+      const events = [];
+      const w = fsWatch(target, { recursive: stat.isDirectory() }, (eventType, filename) => {
+        events.push({ id: ++watchEventId, type: eventType, file: filename || '', time: new Date().toISOString() });
+      });
+      watchers.set(key, { w, events, isDir: stat.isDirectory() });
+      return { watched: key, isDir: stat.isDirectory(), started: true, events: [] };
+    }
+
+    // Return accumulated events
+    const w = watchers.get(key);
+    const evts = w.events.splice(0);
+    return { watched: key, isDir: w.isDir, events: evts };
   }
 };
-serve(tools, h);
+
+// === Resource support ===
+function listResources() {
+  return [
+    { uri: pathToFileUri(WORKSPACE), name: 'Workspace root', description: `Workspace directory: ${WORKSPACE}`, mimeType: 'inode/directory' }
+  ];
+}
+
+function readResource(uri) {
+  const p = fileUriToPath(uri);
+  const resolved = ok(p);
+  const s = statSync(resolved);
+  if (s.isDirectory()) {
+    const items = readdirSync(resolved);
+    return { uri, mimeType: 'inode/directory', text: JSON.stringify(items) };
+  }
+  const text = readFileSync(resolved, 'utf-8');
+  const mimeType = resolved.endsWith('.json') ? 'application/json'
+    : resolved.endsWith('.md') ? 'text/markdown'
+    : resolved.endsWith('.mjs') || resolved.endsWith('.js') ? 'text/javascript'
+    : 'text/plain';
+  return { uri, mimeType, text };
+}
+
+h._resources = listResources;
+h._readResource = readResource;
+
+// === CLI ===
+const args = process.argv.slice(2);
+const httpMode = args.includes('--http');
+const httpPort = (() => {
+  const idx = args.indexOf('--port');
+  if (idx !== -1 && idx + 1 < args.length) return parseInt(args[idx + 1], 10);
+  return parseInt(process.env.MCP_PORT || '3100', 10);
+})();
+
+if (httpMode) {
+  serveHttp(tools, h, httpPort);
+} else {
+  serve(tools, h);
+}
