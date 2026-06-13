@@ -482,21 +482,34 @@ const h = {
     if (!cmd) return '';
     const cwd = p.cwd || DATA;
     const t = (p.t || 30) * 1000;
-    const batDir = join(DATA, 'temp');
-    mkdirSync(batDir, { recursive: true });
-    const bat = join(batDir, 'run.bat');
-    const prolog = '@echo off\r\nchcp 65001 >nul\r\n';
-    const batContent = p.b64
-      ? prolog + 'powershell -NoProfile -Command "$c=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(\'' + Buffer.from(cmd, 'utf-8').toString('base64') + '\')); cmd /c $c; exit $LASTEXITCODE"\r\n'
-      : prolog + cmd + '\r\n';
-    writeFileSync(bat, batContent);
-    const child = spawnSync('cmd', ['/c', bat], { encoding: 'utf-8', cwd, timeout: t, maxBuffer: 10 * 1024 * 1024 });
-    rmSync(bat, { force: true });
+    const isWin = process.platform === 'win32';
+
+    if (isWin) {
+      const batDir = join(DATA, 'temp');
+      mkdirSync(batDir, { recursive: true });
+      const bat = join(batDir, 'run.bat');
+      const prolog = '@echo off\r\nchcp 65001 >nul\r\n';
+      const batContent = p.b64
+        ? prolog + 'powershell -NoProfile -Command "$c=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(\'' + Buffer.from(cmd, 'utf-8').toString('base64') + '\')); cmd /c $c; exit $LASTEXITCODE"\r\n'
+        : prolog + cmd + '\r\n';
+      writeFileSync(bat, batContent);
+      const child = spawnSync('cmd', ['/c', bat], { encoding: 'utf-8', cwd, timeout: t, maxBuffer: 10 * 1024 * 1024 });
+      rmSync(bat, { force: true });
+      if (child.error) {
+        if (child.pid) try { execSync(`taskkill /F /T /PID ${child.pid} 2>nul`, { timeout: 5000 }); } catch {}
+        return (child.stderr || child.stdout || child.error.message || '').toString().trim();
+      }
+      return (child.stdout || '').trim();
+    }
+
+    // Unix: direct sh -c
+    const shellCmd = p.b64 ? Buffer.from(cmd, 'base64').toString('utf-8') : cmd;
+    const child = spawnSync('/bin/sh', ['-c', shellCmd], { encoding: 'utf-8', cwd, timeout: t, maxBuffer: 10 * 1024 * 1024 });
     if (child.error) {
-      if (child.pid) try { execSync(`taskkill /F /T /PID ${child.pid} 2>nul`, { timeout: 5000 }); } catch {}
+      if (child.pid) try { execSync(`kill -9 ${child.pid} 2>/dev/null`, { timeout: 5000 }); } catch {}
       return (child.stderr || child.stdout || child.error.message || '').toString().trim();
     }
-    return (child.stdout || '').trim();
+    return (child.stdout || '').trim() || (child.stderr || '').trim();
   },
   batch: p => {
     checkReadonly();
