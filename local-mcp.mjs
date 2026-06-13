@@ -374,25 +374,41 @@ export function findBlock(lines, name) {
 
 async function runGrep(s, ext) {
   const exts = ext ? ext.split(/\s+/).filter(Boolean) : ['.mjs', '.js'];
-  const results = [];
   const q = s.toLowerCase();
+
+  // Collect all eligible files
+  const allFiles = [];
   for (const e of exts) {
     const pat = e.startsWith('.') ? `**/*${e}` : `**/*.${e}`;
     const files = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
     for (const f of files) {
-      const fp = join(WORKSPACE, f);
-      if (isBinary(fp)) continue;
+      if (!isBinary(join(WORKSPACE, f))) allFiles.push(f);
+    }
+  }
+
+  // Process with bounded concurrency
+  const CONCURRENCY = 16;
+  let idx = 0;
+
+  async function worker() {
+    const local = [];
+    while (idx < allFiles.length) {
+      const f = allFiles[idx++];
       try {
-        const rl = createInterface({ input: createReadStream(fp, 'utf-8'), crlfDelay: Infinity });
+        const rl = createInterface({ input: createReadStream(join(WORKSPACE, f), 'utf-8'), crlfDelay: Infinity });
         let ln = 0;
         for await (const line of rl) {
           ln++;
-          if (line.toLowerCase().includes(q)) results.push(`${f}:${ln}`);
+          if (line.toLowerCase().includes(q)) local.push(`${f}:${ln}`);
         }
       } catch {}
     }
+    return local;
   }
-  return results;
+
+  const workers = Array.from({ length: Math.min(CONCURRENCY, allFiles.length || 1) }, () => worker());
+  const nested = await Promise.all(workers);
+  return nested.flat();
 }
 
 // === In-memory bookmark cache ===
