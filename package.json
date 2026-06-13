@@ -1,0 +1,27 @@
+{
+  "name": "local-mcp",
+  "version": "1.0.0",
+  "description": "Local file system MCP server — read, edit, search, exec tools for AI assistants via stdin/stdout",
+  "type": "module",
+  "main": "local-mcp.mjs",
+  "bin": {
+    "local-mcp": "./local-mcp.mjs"
+  },
+  "scripts": {
+    "start": "node local-mcp.mjs"
+  },
+  "dependencies": {
+    "diff": "^9.0.0",
+    "glob": "^10.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "local-mcp.mjs",
+    "lib/",
+    "scripts/"
+  ],
+  "keywords": ["mcp", "model-context-protocol", "filesystem", "ai", "claude"],
+  "license": "MIT"
+}
