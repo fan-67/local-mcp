@@ -11,12 +11,9 @@
     "start": "node local-mcp.mjs",
     "test": "node --test test/*.test.mjs"
   },
-  "dependencies": {
-    "diff": "^9.0.0",
-    "glob": "^10.0.0"
-  },
+  "dependencies": {},
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "local-mcp.mjs",

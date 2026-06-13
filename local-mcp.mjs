@@ -1,9 +1,8 @@
 import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync, watch as fsWatch } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream } from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import { resolve, join } from 'path';
-import { globSync } from 'glob';
-import { createTwoFilesPatch } from 'diff';
+import { createInterface } from 'readline';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 
 // === Exported for testing ===
@@ -19,6 +18,74 @@ const ALLOW = [resolve(WORKSPACE + '/')];
 function ok(p) { const f = resolve(p); if (!ALLOW.some(a => f.startsWith(a))) throw err("PERMISSION_DENIED", `Path must be under ${WORKSPACE}/`); return f; }
 function err(t, msg) { const e = new Error(msg); e.code = e.type = t; return e; }
 export function nl(t) { return (t || '').replace(/\r\n/g, '\n'); }
+
+// === Binary detection: check first 8KB for null byte ===
+function isBinary(fp) {
+  try {
+    const fd = openSync(fp, 'r');
+    const buf = Buffer.alloc(8192);
+    const n = readSync(fd, buf, 0, 8192, 0);
+    closeSync(fd);
+    return n > 0 && buf.subarray(0, n).includes(0);
+  } catch { return false; }
+}
+
+// === Excluded dirs for glob ===
+const EXCLUDE_DIRS = ['node_modules', '.git', 'dist', '__pycache__', 'coverage', '.next'];
+function isExcluded(p) { return EXCLUDE_DIRS.some(d => p.includes('/' + d + '/') || p.includes('/' + d) || p.startsWith(d + '/') || p === d); }
+
+// === Minimal line-based unified diff (LCS, zero-dep) ===
+function createTwoFilesPatch(oldName, newName, oldStr, newStr) {
+  const a = oldStr.split('\n'), b = newStr.split('\n');
+  const m = a.length, n = b.length;
+  if (oldStr === newStr) return `--- ${oldName}\n+++ ${newName}\n`;
+
+  // LCS DP table (Int32Array: 4 bytes per cell, ~8MB for 1000×1000)
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = 1; i <= m; i++) {
+    const ai = a[i - 1], dpi = dp[i], dpm = dp[i - 1];
+    for (let j = 1; j <= n; j++) dpi[j] = ai === b[j - 1] ? dpm[j - 1] + 1 : (dpm[j] > dpi[j - 1] ? dpm[j] : dpi[j - 1]);
+  }
+
+  // Traceback: 0=keep, 1=insert, 2=delete
+  const ops = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) { ops.push(0); i--; j--; }
+    else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { ops.push(1); j--; }
+    else { ops.push(2); i--; }
+  }
+  ops.reverse();
+
+  // Build unified diff hunks
+  const out = [`--- ${oldName}`, `+++ ${newName}`];
+  let ai = 0, bi = 0, pos = 0;
+  while (pos < ops.length) {
+    while (pos < ops.length && ops[pos] === 0) { pos++; ai++; bi++; }
+    if (pos >= ops.length) break;
+    const ctxBefore = Math.min(3, pos);
+    const hunkStart = pos - ctxBefore;
+    let ctxCount = 0, hunkEnd = pos;
+    while (hunkEnd < ops.length) {
+      if (ops[hunkEnd] === 0) { ctxCount++; if (ctxCount > 3) break; }
+      else ctxCount = 0;
+      hunkEnd++;
+    }
+    if (ctxCount > 3) hunkEnd -= (ctxCount - 3);
+    const hunkAi = ai - (pos - hunkStart);
+    const hunkBi = bi - (pos - hunkStart);
+    let oldLen = 0, newLen = 0;
+    for (let k = hunkStart; k < hunkEnd; k++) { if (ops[k] !== 1) oldLen++; if (ops[k] !== 2) newLen++; }
+    out.push(`@@ -${hunkAi + 1},${oldLen} +${hunkBi + 1},${newLen} @@`);
+    for (let k = hunkStart; k < hunkEnd; k++) {
+      if (ops[k] === 0) { out.push(' ' + a[ai]); ai++; bi++; }
+      else if (ops[k] === 2) { out.push('-' + a[ai]); ai++; }
+      else { out.push('+' + b[bi]); bi++; }
+    }
+    pos = hunkEnd;
+  }
+  return out.join('\n');
+}
 
 // === File URI helpers ===
 export function fileUriToPath(uri) {
@@ -158,17 +225,22 @@ export function findBlock(lines, name) {
   return null;
 }
 
-function runGrep(s, ext) {
+async function runGrep(s, ext) {
   const exts = ext ? ext.split(/\s+/).filter(Boolean) : ['.mjs', '.js'];
   const results = [];
+  const q = s.toLowerCase();
   for (const e of exts) {
     const pat = e.startsWith('.') ? `**/*${e}` : `**/*.${e}`;
-    const files = globSync(pat, { cwd: WORKSPACE, ignore: '**/{node_modules,.git,dist,__pycache__,coverage,.next}/**' });
+    const files = globSync(pat, { cwd: WORKSPACE, exclude: isExcluded });
     for (const f of files) {
+      const fp = join(WORKSPACE, f);
+      if (isBinary(fp)) continue;
       try {
-        const lines = readFileSync(join(WORKSPACE, f), 'utf-8').split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].toLowerCase().includes(s.toLowerCase())) results.push(`${f}:${i + 1}`);
+        const rl = createInterface({ input: createReadStream(fp, 'utf-8'), crlfDelay: Infinity });
+        let ln = 0;
+        for await (const line of rl) {
+          ln++;
+          if (line.toLowerCase().includes(q)) results.push(`${f}:${ln}`);
         }
       } catch {}
     }
@@ -212,14 +284,14 @@ const h = {
   },
   append: p => { checkReadonly(); appendFileSync(ok(p.path), p.content, 'utf-8'); invalidateCache(ok(p.path)); return 'ok'; },
   move: p => { checkReadonly(); renameSync(ok(p.source), ok(p.destination)); invalidateCache(ok(p.source)); return 'ok'; },
-  search: p => {
+  search: async p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
     for (const pat of pats) {
-      const results = globSync(pat, { cwd: WORKSPACE, ignore: p.exclude || '**/{node_modules,.git,dist,__pycache__,coverage,.next}/**' });
+      const results = globSync(pat, { cwd: WORKSPACE, exclude: isExcluded });
       if (results.length) return scoreResults(results, p.p);
     }
     if (!p.exclude) {
-      const found = runGrep(p.p, p.ext || '.mjs .js');
+      const found = await runGrep(p.p, p.ext || '.mjs .js');
       if (found.length) return scoreResults(found, p.p);
     }
     return [];
