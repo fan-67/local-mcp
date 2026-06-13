@@ -427,3 +427,55 @@ describe('EXCLUDE_DIRS env', () => {
     else delete process.env.MCP_EXCLUDE;
   });
 });
+
+describe('createTwoFilesPatch', () => {
+  it('should diff two strings', () => {
+    // compactDiff parses the unified diff format
+    const result = compactDiff('--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new\n');
+    assert.equal(result, '+1/-1 lines');
+  });
+
+  it('should handle identical content', () => {
+    assert.equal(compactDiff('--- a\n+++ b\n'), '+0/-0 lines');
+  });
+});
+
+describe('tool catalog', () => {
+  it('should contain copy and diff tools', async () => {
+    const mod = await import('../local-mcp.mjs');
+    const catalog = mod._toolCatalog;
+    assert.ok(catalog.find(t => t.name === 'copy'));
+    assert.ok(catalog.find(t => t.name === 'diff'));
+    assert.ok(catalog.find(t => t.name === 'read'));
+    assert.equal(catalog.length, 13);
+  });
+
+  it('should have readOnlyHint on read/search/ls/grep/diff', async () => {
+    const mod = await import('../local-mcp.mjs');
+    const catalog = mod._toolCatalog;
+    for (const name of ['read', 'search', 'ls', 'grep', 'diff']) {
+      const t = catalog.find(x => x.name === name);
+      assert.ok(t.annotations?.readOnlyHint, `${name} missing readOnlyHint`);
+    }
+  });
+
+  it('should have destructiveHint on exec/move/batch/copy', async () => {
+    const mod = await import('../local-mcp.mjs');
+    const catalog = mod._toolCatalog;
+    for (const name of ['exec', 'move', 'batch', 'copy']) {
+      const t = catalog.find(x => x.name === name);
+      assert.ok(t.annotations?.destructiveHint, `${name} missing destructiveHint`);
+    }
+  });
+});
+
+describe('scoreResults', () => {
+  it('should prefer exact filename match', () => {
+    const result = scoreResults(['src/util/helper.js', 'helper.js', 'test/helper.test.js'], 'helper.js');
+    assert.equal(result[0], 'helper.js');
+  });
+
+  it('should return empty for empty input', () => {
+    assert.deepEqual(scoreResults([], 'foo'), []);
+  });
+});

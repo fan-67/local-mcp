@@ -1,7 +1,7 @@
 import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, globSync, glob, openSync, readSync, closeSync, createReadStream, existsSync, cpSync } from 'fs';
-import { execSync, spawnSync } from 'child_process';
-import { resolve, join, basename } from 'path';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, glob, openSync, readSync, closeSync, createReadStream, existsSync, cpSync } from 'fs';
+import { spawn } from 'child_process';
+import { resolve, join } from 'path';
 import { createInterface } from 'readline';
 import { fileURLToPath } from 'url';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
@@ -9,6 +9,8 @@ import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 // === Exported for testing ===
 export { createProtocolHandler as _createProtocolHandler };
 export { isBinary as _isBinary, ok as _ok, isExcluded as _isExcluded, sanitizeKey as _sanitizeKey, atomicWrite as _atomicWrite, cachedRead as _cachedRead, invalidateCache as _invalidateCache };
+export { createTwoFilesPatch as _createTwoFilesPatch };
+export { _toolCatalog };
 
 // === Read-only mode ===
 const READONLY = process.env.MCP_READONLY === 'true' || process.env.MCP_READONLY === '1';
@@ -341,19 +343,19 @@ export function scoreResults(results, query) {
 }
 
 const _toolCatalog = [
-  { name: 'read', description: 'Read file, optional head/tail', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, head: { type: 'number', description: 'Lines from start (default 100 for big files)' }, tail: { type: 'number', description: 'Lines from end' } }, required: ['path'] } },
-  { name: 'search', description: 'Find files by name or grep content', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern' }, ext: { type: 'string', description: 'File extension filter e.g. .js .mjs' } }, required: ['p'] } },
-  { name: 'ls', description: 'List directory contents compact', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, tree: { type: 'boolean' }, depth: { type: 'number' }, sort: { type: 'string' } } } },
-  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command' }, cwd: { type: 'string' }, t: { type: 'number', description: 'Timeout seconds' }, b64: { type: 'boolean' } } } },
-  { name: 'move', description: 'Move or rename file', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] } },
-  { name: 'batch', description: 'Batch ops with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array' }, atomic: { type: 'boolean' } }, required: ['ops'] } },
+  { name: 'read', description: 'Read file, optional head/tail, line numbers', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, head: { type: 'number', description: 'Lines from start (default 100 for big files)' }, tail: { type: 'number', description: 'Lines from end' }, lines: { type: 'boolean', description: 'Show line numbers (default true)' } }, required: ['path'] }, annotations: { readOnlyHint: true } },
+  { name: 'search', description: 'Find files by name or grep content', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern' }, ext: { type: 'string', description: 'File extension filter e.g. .js .mjs' } }, required: ['p'] }, annotations: { readOnlyHint: true } },
+  { name: 'ls', description: 'List directory contents compact', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, tree: { type: 'boolean' }, depth: { type: 'number' }, sort: { type: 'string' } } }, annotations: { readOnlyHint: true } },
+  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command' }, cwd: { type: 'string' }, t: { type: 'number', description: 'Timeout seconds' }, b64: { type: 'boolean' }, input: { type: 'string', description: 'Stdin text' } } }, annotations: { destructiveHint: true } },
+  { name: 'move', description: 'Move or rename file', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] }, annotations: { destructiveHint: true } },
+  { name: 'batch', description: 'Batch ops with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array' }, atomic: { type: 'boolean' } }, required: ['ops'] }, annotations: { destructiveHint: true } },
   { name: 'file', description: 'Unified: read|write|edit|append|delete|info|mkdir|move', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' } }, required: ['action', 'path'] } },
   { name: 'block', description: 'Code block by range or function', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, name: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'action'] } },
   { name: 'bookmark', description: 'Path alias add|get|list|delete', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } },
-  { name: 'grep', description: 'Search file contents by pattern', inputSchema: { type: 'object', properties: { s: { type: 'string' }, ext: { type: 'string' } }, required: ['s'] } },
+  { name: 'grep', description: 'Search file contents by pattern', inputSchema: { type: 'object', properties: { s: { type: 'string' }, ext: { type: 'string' } }, required: ['s'] }, annotations: { readOnlyHint: true } },
   { name: 'watch', description: 'Watch file/dir for changes', inputSchema: { type: 'object', properties: { path: { type: 'string' }, once: { type: 'boolean' } }, required: ['path'] } },
-  { name: 'copy', description: 'Copy file or directory', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] } },
-  { name: 'diff', description: 'Diff two files or strings', inputSchema: { type: 'object', properties: { path1: { type: 'string' }, path2: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' } } } }
+  { name: 'copy', description: 'Copy file or directory', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] }, annotations: { destructiveHint: true } },
+  { name: 'diff', description: 'Diff two files or strings', inputSchema: { type: 'object', properties: { path1: { type: 'string' }, path2: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' } } }, annotations: { readOnlyHint: true } }
 ];
 
 // Exposed to client: 3 meta-tools instead of full catalog (~90% token savings)
@@ -491,18 +493,26 @@ const h = {
     const f = ok(p.path);
     let c = cachedRead(f);
     const lines = c.split('\n');
+    const showLines = p.lines !== false;
     const head = p.head ?? (lines.length > 200 ? 100 : undefined);
     const tail = p.tail;
+
+    const fmt = (arr, start) => {
+      if (!showLines) return arr.join('\n');
+      const pad = String(start + arr.length).length;
+      return arr.map((l, i) => String(start + i + 1).padStart(pad) + '|' + l).join('\n');
+    };
+
     if (head && tail) {
-      if (head + tail >= lines.length) return c;
-      return lines.slice(0, head).join('\n') + `\n... (${lines.length - head - tail} lines omitted) ...\n` + lines.slice(-tail).join('\n');
+      if (head + tail >= lines.length) return fmt(lines, 1);
+      return fmt(lines.slice(0, head), 1) + `\n... (${lines.length - head - tail} lines omitted) ...\n` + fmt(lines.slice(-tail), lines.length - tail);
     }
     if (head) {
-      if (head >= lines.length) return c;
-      return lines.slice(0, head).join('\n') + `\n... [truncated: ${lines.length} lines. Use head=N for more]`;
+      if (head >= lines.length) return fmt(lines, 1);
+      return fmt(lines.slice(0, head), 1) + `\n... [truncated: ${lines.length} lines. Use head=N for more]`;
     }
-    if (tail) return lines.slice(-tail).join('\n');
-    return c;
+    if (tail) return fmt(lines.slice(-tail), lines.length - tail);
+    return fmt(lines, 1);
   },
   write: p => { checkReadonly(); atomicWrite(ok(p.path), p.content); updateCache(ok(p.path)); return 'ok'; },
   edit: p => {
@@ -525,8 +535,8 @@ const h = {
       if (results.length) return scoreResults(results, p.p);
     }
     const found = await runGrep(p.p, p.ext || '.mjs .js');
-    if (found.length) return scoreResults(found, p.p);
-    return [{ name: p.p, description: `0 exact matches. Try broader query?` }];
+    if (found.length) return found.join('\n');
+    return `0 exact matches for '${p.p}'. Try broader query?`;
   },
   grep: p => runGrep(p.s, p.ext),
   ls: p => {
@@ -556,41 +566,66 @@ const h = {
     } else throw err('MISSING_PARAM', 'Need path1+path2 or old+new strings');
     return createTwoFilesPatch(oldName, newName, oldStr, newStr);
   },
-  // exec: execute shell commands
-  // ⚠️ keep taskkill — zombie processes linger on timeout
-  exec: p => {
+  // exec: streaming shell command with timeout + truncation
+  exec: async p => {
     const cmd = p.args ? p.args.join(' ') : (p.cmd || '');
     if (!cmd) return '';
     const cwd = p.cwd || DATA;
     const t = (p.t || 30) * 1000;
     const isWin = process.platform === 'win32';
-
-    if (isWin) {
-      const batDir = join(DATA, 'temp');
-      mkdirSync(batDir, { recursive: true });
-      const bat = join(batDir, 'run.bat');
-      const prolog = '@echo off\r\nchcp 65001 >nul\r\n';
-      const batContent = p.b64
-        ? prolog + 'powershell -NoProfile -Command "$c=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(\'' + Buffer.from(cmd, 'utf-8').toString('base64') + '\')); cmd /c $c; exit $LASTEXITCODE"\r\n'
-        : prolog + cmd + '\r\n';
-      writeFileSync(bat, batContent);
-      const child = spawnSync('cmd', ['/c', bat], { encoding: 'utf-8', cwd, timeout: t, maxBuffer: 10 * 1024 * 1024 });
-      rmSync(bat, { force: true });
-      if (child.error) {
-        if (child.pid) try { execSync(`taskkill /F /T /PID ${child.pid} 2>nul`, { timeout: 5000 }); } catch {}
-        return (child.stderr || child.stdout || child.error.message || '').toString().trim();
-      }
-      return (child.stdout || '').trim();
-    }
-
-    // Unix: direct sh -c
     const shellCmd = p.b64 ? Buffer.from(cmd, 'base64').toString('utf-8') : cmd;
-    const child = spawnSync('/bin/sh', ['-c', shellCmd], { encoding: 'utf-8', cwd, timeout: t, maxBuffer: 10 * 1024 * 1024 });
-    if (child.error) {
-      if (child.pid) try { execSync(`kill -9 ${child.pid} 2>/dev/null`, { timeout: 5000 }); } catch {}
-      return (child.stderr || child.stdout || child.error.message || '').toString().trim();
+    const MAX_OUTPUT_LINES = 5000;
+
+    const spawnCmd = isWin ? 'cmd' : '/bin/sh';
+    const spawnArgs = isWin ? ['/c', shellCmd] : ['-c', shellCmd];
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), t);
+    const child = spawn(spawnCmd, spawnArgs, { cwd, signal: ac.signal, stdio: ['pipe', 'pipe', 'pipe'] });
+
+    if (p.input != null) {
+      child.stdin.write(String(p.input));
+      child.stdin.end();
+    } else {
+      child.stdin.end();
     }
-    return (child.stdout || '').trim() || (child.stderr || '').trim();
+
+    const outLines = [];
+    const errLines = [];
+    let outTruncated = false, errTruncated = false;
+
+    const collectStream = (stream, lines, flagRef) => {
+      return new Promise(resolve => {
+        let rl = createInterface({ input: stream });
+        rl.on('line', line => {
+          if (lines.length < MAX_OUTPUT_LINES) lines.push(line);
+          else if (!flagRef[0]) { flagRef[0] = true; lines.push('... (output truncated at ' + MAX_OUTPUT_LINES + ' lines)'); }
+        });
+        rl.on('close', resolve);
+      });
+    };
+
+    const [outResult, errResult] = await Promise.all([
+      collectStream(child.stdout, outLines, [outTruncated]),
+      collectStream(child.stderr, errLines, [errTruncated])
+    ]);
+
+    clearTimeout(timer);
+
+    // Collect remaining exit code / error
+    return new Promise(resolve => {
+      child.on('exit', (code, sig) => {
+        let output = outLines.join('\n');
+        const errOutput = errLines.join('\n');
+        if (sig) output += (output ? '\n' : '') + `[killed: ${sig}]`;
+        else if (code) output += (output ? '\n' : '') + errOutput;
+        resolve(output || errOutput || `[exit code ${code ?? -1}]`);
+      });
+      child.on('error', err => {
+        clearTimeout(timer);
+        resolve(err.message);
+      });
+    });
   },
   batch: p => {
     checkReadonly();
@@ -793,6 +828,21 @@ if (isMain) {
     if (idx !== -1 && idx + 1 < args.length) return parseInt(args[idx + 1], 10);
     return parseInt(process.env.MCP_PORT || '3100', 10);
   })();
+
+  // Self-documenting env vars at startup
+  const envInfo = [];
+  for (const key of Object.keys(process.env).sort()) {
+    if (key.startsWith('MCP_')) {
+      const val = key === 'MCP_READONLY' ? process.env[key] : process.env[key];
+      envInfo.push(`  ${key}=${val}`);
+    }
+  }
+  if (envInfo.length) process.stderr.write('local-mcp env:\n' + envInfo.join('\n') + '\n');
+
+  // Warm up stat cache for common paths
+  setTimeout(() => {
+    try { statSync(WORKSPACE); statSync(DATA); } catch {}
+  }, 100).unref();
 
   if (args.includes('--list-tools') || args.includes('--help')) {
     if (args.includes('--help')) {
