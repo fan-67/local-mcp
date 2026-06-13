@@ -43,7 +43,7 @@ describe('createProtocolHandler', () => {
     assert.ok(promise instanceof Promise);
     const result = await promise;
     assert.equal(result.id, 3);
-    assert.equal(result.result.content[0].text, '"Hello, Test!"');
+    assert.equal(result.result.content[0].text, 'Hello, Test!');
   });
 
   it('should handle tools/call with async handler', async () => {
@@ -53,7 +53,7 @@ describe('createProtocolHandler', () => {
     });
     const result = await promise;
     assert.equal(result.id, 4);
-    assert.equal(result.result.content[0].text, '"Async hello, Async!"');
+    assert.equal(result.result.content[0].text, 'Async hello, Async!');
   });
 
   it('should handle tools/call with unknown tool', async () => {
@@ -149,6 +149,6 @@ describe('createProtocolHandler', () => {
     });
     const result = await promise;
     assert.equal(result.id, 12);
-    assert.equal(result.result.content[0].text, '"Hello, world!"');
+    assert.equal(result.result.content[0].text, 'Hello, world!');
   });
 });
