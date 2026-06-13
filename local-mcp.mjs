@@ -325,18 +325,27 @@ export function scoreResults(results, query) {
   }).sort((a, b) => b.s - a.s).map(x => x.r);
 }
 
-const tools = [
-  { name: 'read', description: 'Read file (head/tail to limit lines; both together shows head + ... + tail)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to file' }, head: { type: 'number', description: 'Number of lines from start' }, tail: { type: 'number', description: 'Number of lines from end' } }, required: ['path'] } },
-  { name: 'search', description: 'Search files by name or content (glob then grep)', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern (filename or path fragment)' }, exclude: { type: 'string', description: 'Glob pattern to exclude (e.g. node_modules/**)' }, ext: { type: 'string', description: 'File extension filter (e.g. .mjs .js)' } }, required: ['p'] } },
-  { name: 'ls', description: 'List directory contents', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, sort: { type: 'string', description: 'Sort order: size' }, tree: { type: 'boolean', description: 'Show tree view' }, depth: { type: 'number', description: 'Tree depth (default 2)' }, detail: { type: 'boolean', description: 'Show full metadata' } } } },
-  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command string' }, args: { type: 'array', items: { type: 'string' }, description: 'Command as args array' }, cwd: { type: 'string', description: 'Working directory' }, t: { type: 'number', description: 'Timeout in seconds (default 30)' }, b64: { type: 'boolean', description: 'Base64 decode cmd before execution' } } } },
-  { name: 'move', description: 'Move or rename file/directory', inputSchema: { type: 'object', properties: { source: { type: 'string', description: 'Source path' }, destination: { type: 'string', description: 'Destination path' } }, required: ['source', 'destination'] } },
-  { name: 'batch', description: 'Batch multiple operations with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' }, description: 'Array of operations' }, stopOnError: { type: 'boolean', description: 'Stop on first error (default true)' }, atomic: { type: 'boolean', description: 'Rollback all on failure' } }, required: ['ops'] } },
-  { name: 'file', description: 'Unified file operations (action=read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'Operation: read|write|edit|append|delete|info|mkdir|move' }, path: { type: 'string', description: 'Target file path' }, content: { type: 'string', description: 'File content (for write)' }, old: { type: 'string', description: 'Text to replace (for edit)' }, new: { type: 'string', description: 'Replacement text (for edit)' }, destination: { type: 'string', description: 'Destination path (for move)' }, head: { type: 'number', description: 'Lines from start (for read)' }, tail: { type: 'number', description: 'Lines from end (for read)' }, dryRun: { type: 'boolean', description: 'Preview changes without applying' } }, required: ['action', 'path'] } },
-  { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, action: { type: 'string', description: 'read|replace|insert|delete' }, range: { type: 'object', properties: { start: { type: 'number', description: 'Start line (1-based)' }, end: { type: 'number', description: 'End line (1-based)' } }, description: 'Line range' }, name: { type: 'string', description: 'Function name to locate' }, content: { type: 'string', description: 'New content' }, dryRun: { type: 'boolean', description: 'Preview diff only' } }, required: ['path', 'action'] } },
-  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'add|get|list|delete' }, name: { type: 'string', description: 'Bookmark name' }, path: { type: 'string', description: 'Path to bookmark' } }, required: ['action'] } },
-  { name: 'watch', description: 'Watch file/directory for changes (event-driven, returns new events since last call)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to file or directory to watch' }, once: { type: 'boolean', description: 'If true, returns current state and stops watching' } }, required: ['path'] } }
+const _toolCatalog = [
+  { name: 'read', description: 'Read file content', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to file' }, head: { type: 'number', description: 'Lines from start' }, tail: { type: 'number', description: 'Lines from end' } }, required: ['path'] } },
+  { name: 'search', description: 'Find files by name or content (glob then grep)', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern' }, ext: { type: 'string', description: 'File extension filter' } }, required: ['p'] } },
+  { name: 'ls', description: 'List directory contents', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, tree: { type: 'boolean', description: 'Show tree view' }, depth: { type: 'number', description: 'Tree depth' } } } },
+  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command string' }, cwd: { type: 'string', description: 'Working directory' }, t: { type: 'number', description: 'Timeout seconds' }, b64: { type: 'boolean' } } } },
+  { name: 'move', description: 'Move or rename file/directory', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] } },
+  { name: 'batch', description: 'Batch operations with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' } }, atomic: { type: 'boolean' } }, required: ['ops'] } },
+  { name: 'file', description: 'Unified file operations (read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' } }, required: ['action', 'path'] } },
+  { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, name: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'action'] } },
+  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } },
+  { name: 'grep', description: 'Search file contents by pattern', inputSchema: { type: 'object', properties: { s: { type: 'string' }, ext: { type: 'string' } }, required: ['s'] } },
+  { name: 'watch', description: 'Watch file/directory for changes', inputSchema: { type: 'object', properties: { path: { type: 'string' }, once: { type: 'boolean' } }, required: ['path'] } }
 ];
+
+// Exposed to client: 3 meta-tools instead of full catalog (~90% token savings)
+const tools = [
+  { name: 'search_tools', description: 'Search available tools by keyword. Returns matching tool names and descriptions.', inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Search keyword' } }, required: ['query'] } },
+  { name: 'describe_tool', description: 'Get full input schema for a specific tool. Call before using call_tool.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Tool name' } }, required: ['name'] } },
+  { name: 'call_tool', description: 'Execute a tool by name with args (see describe_tool for schema).', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Tool name' }, args: { type: 'object', description: 'Tool arguments' } }, required: ['name', 'args'] } }
+];
+
 
 export function applyEdit(content, oldText, newText) {
   const nOld = nl(oldText);
@@ -433,6 +442,26 @@ function loadBookmarks() {
 function saveBookmarks(bm) { _bookmarkCache = bm; atomicWrite(BOOKMARK_FILE, JSON.stringify(bm)); }
 
 const h = {
+  search_tools: p => {
+    const q = (p.query || '').toLowerCase();
+    if (!q) return _toolCatalog.map(t => ({ name: t.name, description: t.description }));
+    return _toolCatalog
+      .filter(t => t.name.includes(q) || t.description.toLowerCase().includes(q))
+      .map(t => ({ name: t.name, description: t.description }));
+  },
+  describe_tool: p => {
+    const t = _toolCatalog.find(t => t.name === p.name);
+    if (!t) throw err('UNKNOWN_TOOL', 'Unknown tool: ' + p.name);
+    return t;
+  },
+  call_tool: p => {
+    if (!p.name || p.name.startsWith('search_tools') || p.name.startsWith('describe_') || p.name === 'call_tool') {
+      throw err('INVALID_TOOL', 'Invalid or reserved tool name: ' + p.name);
+    }
+    const fn = h[p.name];
+    if (!fn || typeof fn !== 'function') throw err('UNKNOWN_TOOL', 'Unknown tool: ' + p.name);
+    return fn(p.args || {});
+  },
   read: p => {
     const f = ok(p.path);
     let c = cachedRead(f);
