@@ -1,8 +1,9 @@
 import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream } from 'fs';
 import { execSync, spawnSync } from 'child_process';
 import { resolve, join } from 'path';
 import { createInterface } from 'readline';
+import { fileURLToPath } from 'url';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 
 // === Exported for testing ===
@@ -327,7 +328,7 @@ const h = {
     updateCache(f);
     return compactDiff(diff);
   },
-  append: p => { checkReadonly(); appendFileSync(ok(p.path), p.content, 'utf-8'); invalidateCache(ok(p.path)); return 'ok'; },
+  append: p => { checkReadonly(); writeFileSync(ok(p.path), p.content, { encoding: 'utf-8', flag: 'a' }); invalidateCache(ok(p.path)); return 'ok'; },
   move: p => { checkReadonly(); renameSync(ok(p.source), ok(p.destination)); invalidateCache(ok(p.source)); return 'ok'; },
   search: async p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
@@ -354,7 +355,6 @@ const h = {
     const kb = total > 1024 ? (total / 1024).toFixed(1) + 'KB' : total + 'B';
     return `${files} files, ${dirs} dirs (${kb})`;
   },
-  tree: p => (p.p || 'MCP') + '/\n' + treeDir(ok(p.p || MCP_DIR), p.depth || 2),
   // exec: bat workaround — Chatbox CVE-2026-6130 blocks top-level cmd params
   // write cmd to run.bat → spawnSync → delete immediately
   // b64: base64 → PowerShell decode, bypass cmd escaping; batch embedded exec unaffected
@@ -420,7 +420,7 @@ const h = {
       case 'write': checkReadonly(); return h.write(p);
       case 'edit': checkReadonly(); return h.edit(p);
       case 'append': checkReadonly(); return h.append(p);
-      case 'move': checkReadonly(); renameSync(ok(p.path), ok(p.destination)); invalidateCache(ok(p.path)); return 'ok';
+      case 'move': return h.move({ source: p.path, destination: p.destination });
       case 'mkdir': checkReadonly(); mkdirSync(ok(p.path), { recursive: true }); return 'ok';
       case 'delete': checkReadonly(); rmSync(ok(p.path), { recursive: true, force: true }); return 'ok';
       case 'info': {
@@ -544,7 +544,12 @@ h._readResource = readResource;
 
 // === CLI ===
 // Only start server when run directly, not when imported for testing
-const isMain = process.argv[1] && (process.argv[1] === resolve(import.meta.url.replace('file://', '')) || process.argv[1].endsWith('/local-mcp.mjs'));
+const isMain = (() => {
+  if (!process.argv[1]) return false;
+  const meta = resolve(fileURLToPath(import.meta.url));
+  const arg = resolve(process.argv[1]);
+  return meta === arg;
+})();
 if (isMain) {
   const args = process.argv.slice(2);
   const httpMode = args.includes('--http');
