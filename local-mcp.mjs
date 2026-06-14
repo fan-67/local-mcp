@@ -1,16 +1,13 @@
 import { serve, serveHttp, createProtocolHandler } from './lib/mcp-core.mjs';
-import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, rmSync, renameSync, watch as fsWatch, glob, openSync, readSync, closeSync, createReadStream, existsSync, cpSync } from 'fs';
-import { spawn } from 'child_process';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, statSync, appendFileSync, rmSync, renameSync, watch as fsWatch, globSync, openSync, readSync, closeSync, createReadStream } from 'fs';
+import { execSync, spawnSync } from 'child_process';
 import { resolve, join } from 'path';
+import { availableParallelism } from 'os';
 import { createInterface } from 'readline';
-import { fileURLToPath } from 'url';
 import { WORKSPACE, DATA, BOOKMARK_FILE, MCP_DIR } from './lib/config.mjs';
 
 // === Exported for testing ===
 export { createProtocolHandler as _createProtocolHandler };
-export { isBinary as _isBinary, ok as _ok, isExcluded as _isExcluded, sanitizeKey as _sanitizeKey, atomicWrite as _atomicWrite, cachedRead as _cachedRead, invalidateCache as _invalidateCache };
-export { createTwoFilesPatch as _createTwoFilesPatch };
-export { _toolCatalog };
 
 // === Read-only mode ===
 const READONLY = process.env.MCP_READONLY === 'true' || process.env.MCP_READONLY === '1';
@@ -35,7 +32,7 @@ function isBinary(fp) {
 }
 
 // === Excluded dirs + .gitignore ===
-const EXCLUDE_DIRS = ['node_modules', '.git', 'dist', '__pycache__', 'coverage', '.next', ...(process.env.MCP_EXCLUDE ? process.env.MCP_EXCLUDE.split(',').map(s => s.trim()).filter(Boolean) : [])];
+const EXCLUDE_DIRS = ['node_modules', '.git', 'dist', '__pycache__', 'coverage', '.next'];
 function isExcluded(p) { return EXCLUDE_DIRS.some(d => p.includes('/' + d + '/') || p.includes('/' + d) || p.startsWith(d + '/') || p === d); }
 
 // Load .gitignore patterns from workspace root
@@ -71,145 +68,69 @@ function isGitignored(fp) {
 
 function isSkipped(fp) { return isExcluded(fp) || isGitignored(fp); }
 
-// === Myers' diff (O(N*D) time, O(N+M) space, zero-dep) ===
-// Produces same unified diff format as GNU diff -u
-function myersEditOps(a, b) {
-  // Returns [{ t: 'k'|'i'|'d', l: line }] in forward order
-  const n = a.length, m = b.length;
-  if (n === 0 && m === 0) return [];
-  if (n === 0) return b.map(l => ({ t: 'i', l }));
-  if (m === 0) return a.map(l => ({ t: 'd', l }));
+// === Minimal line-based unified diff (LCS, zero-dep) ===
+function createTwoFilesPatch(oldName, newName, oldStr, newStr) {
+  const a = oldStr.split('\n'), b = newStr.split('\n');
+  const m = a.length, n = b.length;
+  if (oldStr === newStr) return `--- ${oldName}\n+++ ${newName}\n`;
 
-  const max = n + m;
-  const V = new Int32Array(2 * max + 1);
-  const trace = [];
-
-  // Forward pass: find minimal edit distance D
-  let D;
-  for (let d = 0; d <= max; d++) {
-    trace.push(new Int32Array(V));
-    for (let k = -d; k <= d; k += 2) {
-      const idx = k + max;
-      let x;
-      if (k === -d || (k !== d && V[idx - 1] < V[idx + 1])) {
-        x = V[idx + 1]; // from k+1: vertical move (insert from b)
-      } else {
-        x = V[idx - 1] + 1; // from k-1: horizontal move (delete from a)
-      }
-      let y = x - k;
-      while (x < n && y < m && a[x] === b[y]) { x++; y++; }
-      V[idx] = x;
-      if (x === n && y === m) { D = d; break; }
+  // For large files, fall back to simple hunk to avoid O(n*m) memory bomb
+  if (m * n > 2_000_000) {
+    const out = [`--- ${oldName}`, `+++ ${newName}`, `@@ -1,${m} +1,${n} @@`];
+    for (let i = 0; i < Math.min(m, n); i++) {
+      if (a[i] === b[i]) out.push(' ' + a[i]);
+      else { out.push('-' + a[i]); out.push('+' + b[i]); }
     }
-    if (D !== undefined) break;
+    for (let i = Math.min(m, n); i < m; i++) out.push('-' + a[i]);
+    for (let i = Math.min(m, n); i < n; i++) out.push('+' + b[i]);
+    return out.join('\n');
   }
 
-  // Backtrack through trace to build ops (in reverse)
+  // LCS DP table (Int32Array: 4 bytes per cell, ~8MB for 1000×1000)
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = 1; i <= m; i++) {
+    const ai = a[i - 1], dpi = dp[i], dpm = dp[i - 1];
+    for (let j = 1; j <= n; j++) dpi[j] = ai === b[j - 1] ? dpm[j - 1] + 1 : (dpm[j] > dpi[j - 1] ? dpm[j] : dpi[j - 1]);
+  }
+
+  // Traceback: 0=keep, 1=insert, 2=delete
   const ops = [];
-  let x = n, y = m;
-  for (let d = D; d > 0; d--) {
-    const prevV = trace[d - 1];
-    const k = x - y;
-    const idx = k + max;
-
-    // Unwind diagonal snake
-    while (x > 0 && y > 0 && a[x - 1] === b[y - 1]) {
-      ops.push({ t: 'k', l: a[x - 1] });
-      x--; y--;
-    }
-
-    // Determine which diagonal we came from at depth d-1
-    // Must match forward pass rule: k === -d || (k !== d && V[idx-1] < V[idx+1])
-    // means came from k+1 (insert), else from k-1 (delete)
-    if (k === -d || (k !== d && prevV[idx - 1] < prevV[idx + 1])) {
-      // Came from k+1: was an insert from b
-      ops.push({ t: 'i', l: b[y - 1] });
-      y--;
-    } else {
-      // Came from k-1: was a delete from a
-      ops.push({ t: 'd', l: a[x - 1] });
-      x--;
-    }
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i - 1] === b[j - 1]) { ops.push(0); i--; j--; }
+    else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) { ops.push(1); j--; }
+    else { ops.push(2); i--; }
   }
-  // Remaining diagonal at d=0
-  while (x > 0 && y > 0 && a[x - 1] === b[y - 1]) {
-    ops.push({ t: 'k', l: a[x - 1] });
-    x--; y--;
-  }
+  ops.reverse();
 
-  return ops.reverse();
-}
-
-function buildUnifiedDiff(a, b, oldName, newName) {
-  // Use Myers if total lines < 2000, fall back to simple for large files
-  const n = a.length, m = b.length;
-  if (n * m > 4_000_000) {
-    return buildSimpleDiff(a, b, oldName, newName);
-  }
-  const ops = myersEditOps(a, b);
-
-  const hasChanges = ops.some(o => o.t !== 'k');
-  if (!hasChanges) return `--- ${oldName}\n+++ ${newName}\n`;
-
+  // Build unified diff hunks
   const out = [`--- ${oldName}`, `+++ ${newName}`];
   let ai = 0, bi = 0, pos = 0;
-
   while (pos < ops.length) {
-    // Skip keep ops
-    while (pos < ops.length && ops[pos].t === 'k') { pos++; ai++; bi++; }
+    while (pos < ops.length && ops[pos] === 0) { pos++; ai++; bi++; }
     if (pos >= ops.length) break;
-
-    // Context before: up to 3 keep ops (all ops before pos are keep ops)
     const ctxBefore = Math.min(3, pos);
     const hunkStart = pos - ctxBefore;
-    ai -= ctxBefore;
-    bi -= ctxBefore;
-
-    // Find end of hunk: up to 3 context lines after changes
-    let ctxAfter = 0, hunkEnd = pos;
+    let ctxCount = 0, hunkEnd = pos;
     while (hunkEnd < ops.length) {
-      if (ops[hunkEnd].t === 'k') { ctxAfter++; if (ctxAfter > 3) break; }
-      else ctxAfter = 0;
+      if (ops[hunkEnd] === 0) { ctxCount++; if (ctxCount > 3) break; }
+      else ctxCount = 0;
       hunkEnd++;
     }
-    if (ctxAfter > 3) hunkEnd -= (ctxAfter - 3);
-
-    // Calculate hunk header
+    if (ctxCount > 3) hunkEnd -= (ctxCount - 3);
+    const hunkAi = ai - (pos - hunkStart);
+    const hunkBi = bi - (pos - hunkStart);
     let oldLen = 0, newLen = 0;
+    for (let k = hunkStart; k < hunkEnd; k++) { if (ops[k] !== 1) oldLen++; if (ops[k] !== 2) newLen++; }
+    out.push(`@@ -${hunkAi + 1},${oldLen} +${hunkBi + 1},${newLen} @@`);
     for (let k = hunkStart; k < hunkEnd; k++) {
-      if (ops[k].t !== 'i') oldLen++;
-      if (ops[k].t !== 'd') newLen++;
-    }
-    out.push(`@@ -${ai + 1},${oldLen} +${bi + 1},${newLen} @@`);
-
-    // Emit hunk lines
-    for (let k = hunkStart; k < hunkEnd; k++) {
-      const o = ops[k];
-      if (o.t === 'k') { out.push(' ' + a[ai]); ai++; bi++; }
-      else if (o.t === 'd') { out.push('-' + a[ai]); ai++; }
+      if (ops[k] === 0) { out.push(' ' + a[ai]); ai++; bi++; }
+      else if (ops[k] === 2) { out.push('-' + a[ai]); ai++; }
       else { out.push('+' + b[bi]); bi++; }
     }
     pos = hunkEnd;
   }
   return out.join('\n');
-}
-
-function buildSimpleDiff(a, b, oldName, newName) {
-  const n = a.length, m = b.length;
-  const out = [`--- ${oldName}`, `+++ ${newName}`, `@@ -1,${n} +1,${m} @@`];
-  for (let i = 0; i < Math.min(n, m); i++) {
-    if (a[i] === b[i]) out.push(' ' + a[i]);
-    else { out.push('-' + a[i]); out.push('+' + b[i]); }
-  }
-  for (let i = Math.min(n, m); i < n; i++) out.push('-' + a[i]);
-  for (let i = Math.min(n, m); i < m; i++) out.push('+' + b[i]);
-  return out.join('\n');
-}
-
-function createTwoFilesPatch(oldName, newName, oldStr, newStr) {
-  const a = oldStr.split('\n'), b = newStr.split('\n');
-  if (oldStr === newStr) return `--- ${oldName}\n+++ ${newName}\n`;
-  return buildUnifiedDiff(a, b, oldName, newName);
 }
 
 // === File URI helpers ===
@@ -226,80 +147,41 @@ export function pathToFileUri(p) {
 // === Watch state ===
 const watchers = new Map();
 let watchEventId = 0;
-const MAX_WATCHERS = 20;
-
-function cleanupWatchers() {
-  for (const [key, entry] of watchers) {
-    try { entry.w.close(); } catch {}
-    watchers.delete(key);
-  }
-}
-
-process.on('exit', cleanupWatchers);
-process.on('SIGINT', () => { cleanupWatchers(); process.exit(0); });
-process.on('SIGTERM', () => { cleanupWatchers(); process.exit(0); });
 
 // === Iterative directory tree (stack-safe, no recursion) ===
 export function treeDir(root, maxDepth) {
-  const parts = [];
+  let result = '';
   const stack = [{ dir: root, pre: '', depth: 0 }];
   while (stack.length) {
     const { dir, pre, depth } = stack.pop();
-    if (depth >= maxDepth) { parts.push(pre + '...\n'); continue; }
+    if (depth >= maxDepth) { result += pre + '...\n'; continue; }
     const items = readdirSync(dir, { withFileTypes: true });
     const children = [];
     for (let i = 0; i < items.length; i++) {
       const entry = items[i];
       const last = i === items.length - 1;
-      parts.push(pre + (last ? '└── ' : '├── ') + entry.name + '\n');
+      result += pre + (last ? '└── ' : '├── ') + entry.name + '\n';
       if (entry.isDirectory()) children.push({ dir: join(dir, entry.name), pre: pre + (last ? '    ' : '│   '), depth: depth + 1 });
     }
     for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
   }
-  return parts.join('');
+  return result;
 }
 
-// === Read cache + atomic write (size-aware eviction) ===
-const readCache = new Map();
-const CACHE_MAX_ITEMS = 50;
-const CACHE_MAX_BYTES = 10 * 1024 * 1024;
-const CACHE_TTL_MS = 5000;
-let cacheBytes = 0;
-
-function evictCache() {
-  while (readCache.size > CACHE_MAX_ITEMS || (cacheBytes > CACHE_MAX_BYTES && readCache.size > 1)) {
-    // Evict largest entry to reclaim most bytes per eviction
-    let maxKey, maxSize = -1;
-    for (const [k, v] of readCache) {
-      if (v.size > maxSize) { maxSize = v.size; maxKey = k; }
-    }
-    if (maxKey) { cacheBytes -= readCache.get(maxKey).size; readCache.delete(maxKey); }
-  }
-}
-
+// === Read cache + atomic write ===
+const readCache = new Map(), MAX_CACHE = 10;
 function cachedRead(f) {
-  const st = statSync(f);
+  const mtime = statSync(f).mtimeMs;
   const entry = readCache.get(f);
-  if (entry && entry.mtime === st.mtimeMs && Date.now() - entry.cachedAt < CACHE_TTL_MS) return entry.content;
+  if (entry && entry.mtime === mtime) return entry.content;
   const content = readFileSync(f, 'utf-8');
-  readCache.set(f, { content, mtime: st.mtimeMs, size: st.size, cachedAt: Date.now() });
-  cacheBytes += st.size;
-  if (readCache.size > CACHE_MAX_ITEMS || cacheBytes > CACHE_MAX_BYTES) evictCache();
+  readCache.set(f, { content, mtime });
+  if (readCache.size > MAX_CACHE) { const k = readCache.keys().next().value; if (k !== undefined) readCache.delete(k); }
   return content;
 }
-function invalidateCache(f) { const e = readCache.get(f); if (e) { cacheBytes -= e.size; readCache.delete(f); } }
-function updateCache(f) {
-  try {
-    const content = readFileSync(f, 'utf-8');
-    const st = statSync(f);
-    const old = readCache.get(f);
-    if (old) cacheBytes -= old.size;
-    readCache.set(f, { content, mtime: st.mtimeMs, size: st.size });
-    cacheBytes += st.size;
-  } catch {}
-}
+function invalidateCache(f) { readCache.delete(f); }
+function updateCache(f) { try { const c = readFileSync(f, 'utf-8'); readCache.set(f, { content: c, mtime: statSync(f).mtimeMs }); } catch {} }
 function atomicWrite(f, content) {
-  if (existsSync(f) && statSync(f).isDirectory()) throw err('IS_DIRECTORY', 'Path is a directory: ' + f);
   const tmp = f + '.tmp.' + Date.now();
   writeFileSync(tmp, content, 'utf-8');
   renameSync(tmp, f);
@@ -318,53 +200,30 @@ export function compactDiff(diff) {
 
 export function scoreResults(results, query) {
   const q = query.toLowerCase();
-  // Score by name match first (no statSync)
-  const scored = results.map(r => {
+  return results.map(r => {
     let s = 0;
     const n = r.split('/').pop().toLowerCase();
     if (n === q) s += 20;
     else if (n.includes(q)) s += 10;
     else for (let i = 0; i < q.length && i < n.length; i++) if (n[i] === q[i]) s += 2;
     s -= r.split('/').length;
+    try { const st = statSync(join(WORKSPACE, r)); const age = Date.now() - st.mtimeMs; if (age < 3600000) s += 5; else if (age < 86400000) s += 3; else if (age < 604800000) s += 1; } catch {}
     return { r, s };
-  }).sort((a, b) => b.s - a.s);
-  // Only stat top candidates for mtime bonus (avoids N statSync calls)
-  const TOP_N = 50;
-  for (let i = 0; i < Math.min(TOP_N, scored.length); i++) {
-    try {
-      const st = statSync(join(WORKSPACE, scored[i].r));
-      const age = Date.now() - st.mtimeMs;
-      if (age < 3600000) scored[i].s += 5;
-      else if (age < 86400000) scored[i].s += 3;
-      else if (age < 604800000) scored[i].s += 1;
-    } catch {}
-  }
-  return scored.sort((a, b) => b.s - a.s).map(x => x.r);
+  }).sort((a, b) => b.s - a.s).map(x => x.r);
 }
 
-const _toolCatalog = [
-  { name: 'read', description: 'Read file, optional head/tail, line numbers', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, head: { type: 'number', description: 'Lines from start (default 100 for big files)' }, tail: { type: 'number', description: 'Lines from end' }, lines: { type: 'boolean', description: 'Show line numbers (default true)' } }, required: ['path'] }, annotations: { readOnlyHint: true } },
-  { name: 'search', description: 'Find files by name or grep content', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern' }, ext: { type: 'string', description: 'File extension filter e.g. .js .mjs' } }, required: ['p'] }, annotations: { readOnlyHint: true } },
-  { name: 'ls', description: 'List directory contents compact', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, tree: { type: 'boolean' }, depth: { type: 'number' }, sort: { type: 'string' } } }, annotations: { readOnlyHint: true } },
-  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command' }, cwd: { type: 'string' }, t: { type: 'number', description: 'Timeout seconds' }, b64: { type: 'boolean' }, input: { type: 'string', description: 'Stdin text' } } }, annotations: { destructiveHint: true } },
-  { name: 'move', description: 'Move or rename file', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] }, annotations: { destructiveHint: true } },
-  { name: 'batch', description: 'Batch ops with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array' }, atomic: { type: 'boolean' } }, required: ['ops'] }, annotations: { destructiveHint: true } },
-  { name: 'file', description: 'Unified: read|write|edit|append|delete|info|mkdir|move', inputSchema: { type: 'object', properties: { action: { type: 'string' }, path: { type: 'string' }, content: { type: 'string' } }, required: ['action', 'path'] } },
-  { name: 'block', description: 'Code block by range or function', inputSchema: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string' }, name: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'action'] } },
-  { name: 'bookmark', description: 'Path alias add|get|list|delete', inputSchema: { type: 'object', properties: { action: { type: 'string' }, name: { type: 'string' }, path: { type: 'string' } }, required: ['action'] } },
-  { name: 'grep', description: 'Search file contents by pattern', inputSchema: { type: 'object', properties: { s: { type: 'string' }, ext: { type: 'string' } }, required: ['s'] }, annotations: { readOnlyHint: true } },
-  { name: 'watch', description: 'Watch file/dir for changes', inputSchema: { type: 'object', properties: { path: { type: 'string' }, once: { type: 'boolean' } }, required: ['path'] } },
-  { name: 'copy', description: 'Copy file or directory', inputSchema: { type: 'object', properties: { source: { type: 'string' }, destination: { type: 'string' } }, required: ['source', 'destination'] }, annotations: { destructiveHint: true } },
-  { name: 'diff', description: 'Diff two files or strings', inputSchema: { type: 'object', properties: { path1: { type: 'string' }, path2: { type: 'string' }, old: { type: 'string' }, new: { type: 'string' } } }, annotations: { readOnlyHint: true } }
-];
-
-// Exposed to client: 3 meta-tools instead of full catalog (~90% token savings)
 const tools = [
-  { name: 'search_tools', description: 'Search available tools by keyword. Returns matching tool names and descriptions.', inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'Search keyword' } }, required: ['query'] } },
-  { name: 'describe_tool', description: 'Get full input schema for a specific tool. Call before using call_tool.', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Tool name' } }, required: ['name'] } },
-  { name: 'call_tool', description: 'Execute a tool by name with args (see describe_tool for schema).', inputSchema: { type: 'object', properties: { name: { type: 'string', description: 'Tool name' }, args: { type: 'object', description: 'Tool arguments' } }, required: ['name', 'args'] } }
+  { name: 'read', description: 'Read file (head/tail to limit lines; both together shows head + ... + tail)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Absolute path to file' }, head: { type: 'number', description: 'Number of lines from start' }, tail: { type: 'number', description: 'Number of lines from end' } }, required: ['path'] } },
+  { name: 'search', description: 'Search files by name or content (glob then grep)', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Search pattern (filename or path fragment)' }, exclude: { type: 'string', description: 'Glob pattern to exclude (e.g. node_modules/**)' }, ext: { type: 'string', description: 'File extension filter (e.g. .mjs .js)' } }, required: ['p'] } },
+  { name: 'ls', description: 'List directory contents', inputSchema: { type: 'object', properties: { p: { type: 'string', description: 'Directory path' }, sort: { type: 'string', description: 'Sort order: size' }, tree: { type: 'boolean', description: 'Show tree view' }, depth: { type: 'number', description: 'Tree depth (default 2)' }, detail: { type: 'boolean', description: 'Show full metadata' } } } },
+  { name: 'exec', description: 'Execute shell command', inputSchema: { type: 'object', properties: { cmd: { type: 'string', description: 'Command string' }, args: { type: 'array', items: { type: 'string' }, description: 'Command as args array' }, cwd: { type: 'string', description: 'Working directory' }, t: { type: 'number', description: 'Timeout in seconds (default 30)' }, b64: { type: 'boolean', description: 'Base64 decode cmd before execution' } } } },
+  { name: 'move', description: 'Move or rename file/directory', inputSchema: { type: 'object', properties: { source: { type: 'string', description: 'Source path' }, destination: { type: 'string', description: 'Destination path' } }, required: ['source', 'destination'] } },
+  { name: 'batch', description: 'Batch multiple operations with rollback', inputSchema: { type: 'object', properties: { ops: { type: 'array', items: { type: 'object' }, description: 'Array of operations' }, stopOnError: { type: 'boolean', description: 'Stop on first error (default true)' }, atomic: { type: 'boolean', description: 'Rollback all on failure' } }, required: ['ops'] } },
+  { name: 'file', description: 'Unified file operations (action=read|write|edit|append|delete|info|mkdir|move)', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'Operation: read|write|edit|append|delete|info|mkdir|move' }, path: { type: 'string', description: 'Target file path' }, content: { type: 'string', description: 'File content (for write)' }, old: { type: 'string', description: 'Text to replace (for edit)' }, new: { type: 'string', description: 'Replacement text (for edit)' }, destination: { type: 'string', description: 'Destination path (for move)' }, head: { type: 'number', description: 'Lines from start (for read)' }, tail: { type: 'number', description: 'Lines from end (for read)' }, dryRun: { type: 'boolean', description: 'Preview changes without applying' } }, required: ['action', 'path'] } },
+  { name: 'block', description: 'Code block operations by range or function name', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'File path' }, action: { type: 'string', description: 'read|replace|insert|delete' }, range: { type: 'object', properties: { start: { type: 'number', description: 'Start line (1-based)' }, end: { type: 'number', description: 'End line (1-based)' } }, description: 'Line range' }, name: { type: 'string', description: 'Function name to locate' }, content: { type: 'string', description: 'New content' }, dryRun: { type: 'boolean', description: 'Preview diff only' } }, required: ['path', 'action'] } },
+  { name: 'bookmark', description: 'Persistent path aliases', inputSchema: { type: 'object', properties: { action: { type: 'string', description: 'add|get|list|delete' }, name: { type: 'string', description: 'Bookmark name' }, path: { type: 'string', description: 'Path to bookmark' } }, required: ['action'] } },
+  { name: 'watch', description: 'Watch file/directory for changes (event-driven, returns new events since last call)', inputSchema: { type: 'object', properties: { path: { type: 'string', description: 'Path to file or directory to watch' }, once: { type: 'boolean', description: 'If true, returns current state and stops watching' } }, required: ['path'] } }
 ];
-
 
 export function applyEdit(content, oldText, newText) {
   const nOld = nl(oldText);
@@ -412,46 +271,34 @@ export function findBlock(lines, name) {
   return null;
 }
 
+const MAX_GREP_TOTAL_BYTES = 100 * 1024 * 1024; // 100 MB total limit
+
 async function runGrep(s, ext) {
   const exts = ext ? ext.split(/\s+/).filter(Boolean) : ['.mjs', '.js'];
+  const results = [];
   const q = s.toLowerCase();
-  const MAX_SEARCH_FILES = 5000;
-
-  // Collect all eligible files (async glob)
-  const allFiles = [];
   for (const e of exts) {
     const pat = e.startsWith('.') ? `**/*${e}` : `**/*.${e}`;
-    const files = await glob(pat, { cwd: WORKSPACE, exclude: isSkipped });
+    const files = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
+    let totalFiles = 0, totalBytes = 0;
+    const MAX_GREP_FILES = 1000;
     for (const f of files) {
-      if (!isBinary(join(WORKSPACE, f))) allFiles.push(f);
-      if (allFiles.length >= MAX_SEARCH_FILES) break;
-    }
-    if (allFiles.length >= MAX_SEARCH_FILES) break;
-  }
-
-  // Process with bounded concurrency
-  const CONCURRENCY = 16;
-  let idx = 0;
-
-  async function worker() {
-    const local = [];
-    while (idx < allFiles.length) {
-      const f = allFiles[idx++];
+      const fp = join(WORKSPACE, f);
+      if (isBinary(fp)) continue;
       try {
-        const rl = createInterface({ input: createReadStream(join(WORKSPACE, f), 'utf-8'), crlfDelay: Infinity });
+        if (++totalFiles > MAX_GREP_FILES || totalBytes > MAX_GREP_TOTAL_BYTES) break;
+        const rl = createInterface({ input: createReadStream(fp, 'utf-8'), crlfDelay: Infinity });
         let ln = 0;
         for await (const line of rl) {
           ln++;
-          if (line.toLowerCase().includes(q)) local.push(`${f}:${ln}:${line.replace(/\t/g, ' ').trimEnd()}`);
+          totalBytes += Buffer.byteLength(line, 'utf-8');
+          if (totalBytes > MAX_GREP_TOTAL_BYTES) break;
+          if (line.toLowerCase().includes(q)) results.push(`${f}:${ln}`);
         }
       } catch {}
     }
-    return local;
   }
-
-  const workers = Array.from({ length: Math.min(CONCURRENCY, allFiles.length || 1) }, () => worker());
-  const nested = await Promise.all(workers);
-  return nested.flat();
+  return results;
 }
 
 // === In-memory bookmark cache ===
@@ -463,56 +310,44 @@ function loadBookmarks() {
 }
 function saveBookmarks(bm) { _bookmarkCache = bm; atomicWrite(BOOKMARK_FILE, JSON.stringify(bm)); }
 
-function sanitizeKey(key) {
-  if (key === '__proto__' || key === 'constructor' || key === 'prototype') throw err('FORBIDDEN_KEY', 'Reserved key: ' + key);
-  return key;
+// === Stream head reader (zero alloc for large files) ===
+function streamHead(f, maxLines) {
+  try {
+    const stream = createReadStream(f, { encoding: 'utf-8' });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    const lines = [];
+    let closed = false;
+    return new Promise((resolve) => {
+      let resolved = false;
+      const done = (v) => { if (!resolved) { resolved = true; try { stream.destroy(); } catch {}; resolve(v); } };
+      rl.on('line', (line) => {
+        if (lines.length < maxLines) { lines.push(line); }
+        else { if (!closed) { closed = true; done(lines.join('\n')); } }
+      });
+      rl.on('close', () => done(lines.join('\n')));
+      rl.on('error', () => done(null));
+      stream.on('error', () => done(null));
+    });
+  } catch { return null; }
 }
 
 const h = {
-  search_tools: p => {
-    const q = (p.query || '').toLowerCase();
-    if (!q) return _toolCatalog.map(t => ({ name: t.name, description: t.description }));
-    return _toolCatalog
-      .filter(t => t.name.includes(q) || t.description.toLowerCase().includes(q))
-      .map(t => ({ name: t.name, description: t.description }));
-  },
-  describe_tool: p => {
-    const t = _toolCatalog.find(t => t.name === p.name);
-    if (!t) throw err('UNKNOWN_TOOL', 'Unknown tool: ' + p.name);
-    return t;
-  },
-  call_tool: p => {
-    if (!p.name || p.name.startsWith('search_tools') || p.name.startsWith('describe_') || p.name === 'call_tool') {
-      throw err('INVALID_TOOL', 'Invalid or reserved tool name: ' + p.name);
-    }
-    const fn = h[p.name];
-    if (!fn || typeof fn !== 'function') throw err('UNKNOWN_TOOL', 'Unknown tool: ' + p.name);
-    return fn(p.args || {});
-  },
-  read: p => {
+  read: async p => {
     const f = ok(p.path);
+    // Stream head for large files (avoids full read)
+    if (p.head && !p.tail) {
+      const sh = await streamHead(f, p.head);
+      if (sh !== null) return sh;
+    }
     let c = cachedRead(f);
     const lines = c.split('\n');
-    const showLines = p.lines !== false;
-    const head = p.head ?? (lines.length > 200 ? 100 : undefined);
-    const tail = p.tail;
-
-    const fmt = (arr, start) => {
-      if (!showLines) return arr.join('\n');
-      const pad = String(start + arr.length).length;
-      return arr.map((l, i) => String(start + i + 1).padStart(pad) + '|' + l).join('\n');
-    };
-
-    if (head && tail) {
-      if (head + tail >= lines.length) return fmt(lines, 1);
-      return fmt(lines.slice(0, head), 1) + `\n... (${lines.length - head - tail} lines omitted) ...\n` + fmt(lines.slice(-tail), lines.length - tail);
+    if (p.head && p.tail) {
+      if (p.head + p.tail >= lines.length) return c;
+      return lines.slice(0, p.head).join('\n') + `\n... (${lines.length - p.head - p.tail} lines omitted) ...\n` + lines.slice(-p.tail).join('\n');
     }
-    if (head) {
-      if (head >= lines.length) return fmt(lines, 1);
-      return fmt(lines.slice(0, head), 1) + `\n... [truncated: ${lines.length} lines. Use head=N for more]`;
-    }
-    if (tail) return fmt(lines.slice(-tail), lines.length - tail);
-    return fmt(lines, 1);
+    if (p.head) return lines.slice(0, p.head).join('\n');
+    if (p.tail) return lines.slice(-p.tail).join('\n');
+    return c;
   },
   write: p => { checkReadonly(); atomicWrite(ok(p.path), p.content); updateCache(ok(p.path)); return 'ok'; },
   edit: p => {
@@ -526,106 +361,59 @@ const h = {
     updateCache(f);
     return compactDiff(diff);
   },
-  append: p => { checkReadonly(); writeFileSync(ok(p.path), p.content, { encoding: 'utf-8', flag: 'a' }); invalidateCache(ok(p.path)); return 'ok'; },
+  append: p => { checkReadonly(); appendFileSync(ok(p.path), p.content, 'utf-8'); invalidateCache(ok(p.path)); return 'ok'; },
   move: p => { checkReadonly(); renameSync(ok(p.source), ok(p.destination)); invalidateCache(ok(p.source)); return 'ok'; },
   search: async p => {
     const pats = [p.p, `**/*${p.p}*`, `**/*${p.p.replace(/[/\\]/g, '')}*`];
     for (const pat of pats) {
-      const results = await glob(pat, { cwd: WORKSPACE, exclude: isSkipped });
+      const results = globSync(pat, { cwd: WORKSPACE, exclude: isSkipped });
       if (results.length) return scoreResults(results, p.p);
     }
-    const found = await runGrep(p.p, p.ext || '.mjs .js');
-    if (found.length) return found.join('\n');
-    return `0 exact matches for '${p.p}'. Try broader query?`;
+    if (!p.exclude) {
+      const found = await runGrep(p.p, p.ext || '.mjs .js');
+      if (found.length) return scoreResults(found, p.p);
+    }
+    return [];
   },
   grep: p => runGrep(p.s, p.ext),
   ls: p => {
     if (p.tree) return (p.p || 'MCP') + '/\n' + treeDir(ok(p.p || MCP_DIR), p.depth || 2);
     const d = ok(p.p || DATA);
-    const items = readdirSync(d, { withFileTypes: true });
-    const lines = items.map(e => {
-      if (e.isDirectory()) return `${e.name}/           d`;
-      const s = statSync(join(d, e.name));
-      return `${e.name.padEnd(16)} f  ${s.size > 1024 ? (s.size / 1024).toFixed(1) + 'KB' : s.size + 'B'}`;
-    });
-    if (p.sort === 'size') lines.sort((a, b) => {
-      const sa = parseFloat(a.split(' ').pop()) || 0;
-      const sb = parseFloat(b.split(' ').pop()) || 0;
-      return sb - sa;
-    });
-    return lines.join('\n');
+    const items = readdirSync(d, { withFileTypes: true }).map(e => ({ n: e.name, d: e.isDirectory(), s: (e.isFile() && p.sort === 'size') ? statSync(join(d, e.name)).size : 0 }));
+    if (p.sort === 'size') items.sort((a, b) => b.s - a.s);
+    if (p.detail) return items;
+    const files = items.filter(i => !i.d).length;
+    const dirs = items.filter(i => i.d).length;
+    const total = items.reduce((a, i) => a + i.s, 0);
+    const kb = total > 1024 ? (total / 1024).toFixed(1) + 'KB' : total + 'B';
+    return `${files} files, ${dirs} dirs (${kb})`;
   },
-  copy: p => { checkReadonly(); cpSync(ok(p.source), ok(p.destination), { recursive: true }); return 'ok'; },
-  diff: p => {
-    let oldStr, newStr, oldName = 'old', newName = 'new';
-    if (p.path1 && p.path2) {
-      oldStr = cachedRead(ok(p.path1)); oldName = p.path1;
-      newStr = cachedRead(ok(p.path2)); newName = p.path2;
-    } else if (p.old != null && p.new != null) {
-      oldStr = p.old; newStr = p.new;
-    } else throw err('MISSING_PARAM', 'Need path1+path2 or old+new strings');
-    return createTwoFilesPatch(oldName, newName, oldStr, newStr);
-  },
-  // exec: streaming shell command with timeout + truncation
-  exec: async p => {
+  tree: p => (p.p || 'MCP') + '/\n' + treeDir(ok(p.p || MCP_DIR), p.depth || 2),
+  // exec: bat workaround — Chatbox CVE-2026-6130 blocks top-level cmd params
+  // write cmd to run.bat → spawnSync → delete immediately
+  // b64: base64 → PowerShell decode, bypass cmd escaping; batch embedded exec unaffected
+  // ⚠️ keep taskkill — zombie processes linger on timeout
+  exec: p => {
+    checkReadonly();
     const cmd = p.args ? p.args.join(' ') : (p.cmd || '');
     if (!cmd) return '';
     const cwd = p.cwd || DATA;
     const t = (p.t || 30) * 1000;
-    const isWin = process.platform === 'win32';
-    const shellCmd = p.b64 ? Buffer.from(cmd, 'base64').toString('utf-8') : cmd;
-    const MAX_OUTPUT_LINES = 5000;
-
-    const spawnCmd = isWin ? 'cmd' : '/bin/sh';
-    const spawnArgs = isWin ? ['/c', shellCmd] : ['-c', shellCmd];
-
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), t);
-    const child = spawn(spawnCmd, spawnArgs, { cwd, signal: ac.signal, stdio: ['pipe', 'pipe', 'pipe'] });
-
-    if (p.input != null) {
-      child.stdin.write(String(p.input));
-      child.stdin.end();
-    } else {
-      child.stdin.end();
+    const batDir = join(DATA, 'temp');
+    mkdirSync(batDir, { recursive: true });
+    const bat = join(batDir, 'run.bat');
+    const prolog = '@echo off\r\nchcp 65001 >nul\r\n';
+    const batContent = p.b64
+      ? prolog + 'powershell -NoProfile -Command "$c=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String(\'' + Buffer.from(cmd, 'utf-8').toString('base64') + '\')); cmd /c $c; exit $LASTEXITCODE"\r\n'
+      : prolog + cmd + '\r\n';
+    writeFileSync(bat, batContent);
+    const child = spawnSync('cmd', ['/c', bat], { encoding: 'utf-8', cwd, timeout: t, maxBuffer: 10 * 1024 * 1024 });
+    rmSync(bat, { force: true });
+    if (child.error) {
+      if (child.pid) try { execSync(`taskkill /F /T /PID ${child.pid} 2>nul`, { timeout: 5000 }); } catch {}
+      return (child.stderr || child.stdout || child.error.message || '').toString().trim();
     }
-
-    const outLines = [];
-    const errLines = [];
-    let outTruncated = false, errTruncated = false;
-
-    const collectStream = (stream, lines, flagRef) => {
-      return new Promise(resolve => {
-        let rl = createInterface({ input: stream });
-        rl.on('line', line => {
-          if (lines.length < MAX_OUTPUT_LINES) lines.push(line);
-          else if (!flagRef[0]) { flagRef[0] = true; lines.push('... (output truncated at ' + MAX_OUTPUT_LINES + ' lines)'); }
-        });
-        rl.on('close', resolve);
-      });
-    };
-
-    const [outResult, errResult] = await Promise.all([
-      collectStream(child.stdout, outLines, [outTruncated]),
-      collectStream(child.stderr, errLines, [errTruncated])
-    ]);
-
-    clearTimeout(timer);
-
-    // Collect remaining exit code / error
-    return new Promise(resolve => {
-      child.on('exit', (code, sig) => {
-        let output = outLines.join('\n');
-        const errOutput = errLines.join('\n');
-        if (sig) output += (output ? '\n' : '') + `[killed: ${sig}]`;
-        else if (code) output += (output ? '\n' : '') + errOutput;
-        resolve(output || errOutput || `[exit code ${code ?? -1}]`);
-      });
-      child.on('error', err => {
-        clearTimeout(timer);
-        resolve(err.message);
-      });
-    });
+    return (child.stdout || '').trim();
   },
   batch: p => {
     checkReadonly();
@@ -666,7 +454,7 @@ const h = {
       case 'write': checkReadonly(); return h.write(p);
       case 'edit': checkReadonly(); return h.edit(p);
       case 'append': checkReadonly(); return h.append(p);
-      case 'move': return h.move({ source: p.path, destination: p.destination });
+      case 'move': checkReadonly(); renameSync(ok(p.path), ok(p.destination)); invalidateCache(ok(p.path)); return 'ok';
       case 'mkdir': checkReadonly(); mkdirSync(ok(p.path), { recursive: true }); return 'ok';
       case 'delete': checkReadonly(); rmSync(ok(p.path), { recursive: true, force: true }); return 'ok';
       case 'info': {
@@ -717,15 +505,15 @@ const h = {
       case 'add':
         checkReadonly();
         if (!p.name || !p.path) throw err("MISSING_PARAM", "Need name and path");
-        bm[sanitizeKey(p.name)] = ok(p.path); saveBookmarks(bm); return 'ok';
+        bm[p.name] = ok(p.path); saveBookmarks(bm); return 'ok';
       case 'get':
         if (!p.name) throw err("MISSING_PARAM", "Need name");
-        return bm[sanitizeKey(p.name)] || null;
+        return bm[p.name] || null;
       case 'list': return bm;
       case 'delete':
         checkReadonly();
         if (!p.name) throw err("MISSING_PARAM", "Need name");
-        delete bm[sanitizeKey(p.name)]; saveBookmarks(bm); return 'ok';
+        delete bm[p.name]; saveBookmarks(bm); return 'ok';
       default: throw err("INVALID_ACTION", "action: add|get|list|delete");
     }
   },
@@ -746,11 +534,6 @@ const h = {
 
     // Start watching if not already
     if (!watchers.has(key)) {
-      // Evict oldest if at limit
-      if (watchers.size >= MAX_WATCHERS) {
-        const oldest = watchers.keys().next().value;
-        if (oldest) { try { watchers.get(oldest).w.close(); } catch {} watchers.delete(oldest); }
-      }
       const events = [];
       const w = fsWatch(target, { recursive: stat.isDirectory() }, (eventType, filename) => {
         events.push({ id: ++watchEventId, type: eventType, file: filename || '', time: new Date().toISOString() });
@@ -792,34 +575,10 @@ export function readResource(uri) {
 
 h._resources = listResources;
 h._readResource = readResource;
-h._resourceTemplates = () => {
-  const ws = pathToFileUri(WORKSPACE);
-  return [
-    { uriTemplate: ws + '/**', name: 'Workspace files', description: 'All files under workspace, matched by glob pattern' }
-  ];
-};
-h._prompts = () => [
-  { name: 'review_changes', description: 'Review file changes and suggest improvements', arguments: [{ name: 'path', description: 'File or directory to review', required: true }] },
-  { name: 'summarize', description: 'Summarize file content', arguments: [{ name: 'path', description: 'File path', required: true }] }
-];
-h._getPrompt = p => {
-  if (p?.name === 'review_changes') {
-    return [{ type: 'text', text: `Please review the changes in ${p.arguments?.path || 'the specified path'}. Look for bugs, performance issues, and code style problems.` }];
-  }
-  if (p?.name === 'summarize') {
-    return [{ type: 'text', text: `Please provide a concise summary of the file at ${p.arguments?.path || 'the specified path'}.` }];
-  }
-  return [];
-};
 
 // === CLI ===
 // Only start server when run directly, not when imported for testing
-const isMain = (() => {
-  if (!process.argv[1]) return false;
-  const meta = resolve(fileURLToPath(import.meta.url));
-  const arg = resolve(process.argv[1]);
-  return meta === arg;
-})();
+const isMain = process.argv[1] && (process.argv[1] === fileUriToPath(import.meta.url) || process.argv[1].endsWith('\\local-mcp.mjs') || process.argv[1].endsWith('/local-mcp.mjs'));
 if (isMain) {
   const args = process.argv.slice(2);
   const httpMode = args.includes('--http');
@@ -828,40 +587,6 @@ if (isMain) {
     if (idx !== -1 && idx + 1 < args.length) return parseInt(args[idx + 1], 10);
     return parseInt(process.env.MCP_PORT || '3100', 10);
   })();
-
-  // Self-documenting env vars at startup
-  const envInfo = [];
-  for (const key of Object.keys(process.env).sort()) {
-    if (key.startsWith('MCP_')) {
-      const val = key === 'MCP_READONLY' ? process.env[key] : process.env[key];
-      envInfo.push(`  ${key}=${val}`);
-    }
-  }
-  if (envInfo.length) process.stderr.write('local-mcp env:\n' + envInfo.join('\n') + '\n');
-
-  // Warm up stat cache for common paths
-  setTimeout(() => {
-    try { statSync(WORKSPACE); statSync(DATA); } catch {}
-  }, 100).unref();
-
-  if (args.includes('--list-tools') || args.includes('--help')) {
-    if (args.includes('--help')) {
-      process.stderr.write(`local-mcp MCP server
-Usage: node local-mcp.mjs [options]
-
-Options:
-  --http          Start in HTTP mode (default: stdio)
-  --port <num>    HTTP port (default: 3100, env: MCP_PORT)
-  --list-tools    Print available tools and exit
-  --help          Show this help
-`);
-    }
-    process.stderr.write('Available tools:\n');
-    for (const t of _toolCatalog) {
-      process.stderr.write(`  ${t.name}  - ${t.description}\n`);
-    }
-    process.exit(0);
-  }
 
   if (httpMode) {
     serveHttp(tools, h, httpPort);
